@@ -1,0 +1,3 @@
+/home/root1/myblob/build/CMakeFiles/simple_download.dir
+/home/root1/myblob/build/CMakeFiles/edit_cache.dir
+/home/root1/myblob/build/CMakeFiles/rebuild_cache.dir

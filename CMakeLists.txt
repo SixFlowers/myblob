@@ -20,8 +20,12 @@ set(SOURCES
     src/network/message_result.cpp
     src/network/original_message.cpp
     src/network/http_helper.cpp
+    src/network/poll_socket.cpp
 )
 
 add_executable(simple_download example/sync_example.cpp ${SOURCES})
 
+add_executable(batch_example example/batch_example.cpp ${SOURCES})
+
 target_link_libraries(simple_download OpenSSL::SSL OpenSSL::Crypto pthread)
+target_link_libraries(batch_example OpenSSL::SSL OpenSSL::Crypto pthread)

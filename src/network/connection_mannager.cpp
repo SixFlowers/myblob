@@ -3,6 +3,11 @@
 #include <openssl/ssl.h>
 #include <algorithm>
 #include <iostream>
+#include <sys/socket.h>
+#include <netinet/tcp.h>
+#include <netinet/in.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace myblob::network {
 
@@ -14,7 +19,8 @@ ConnectionManager::ConnectionManager(
     , max_idle_seconds_(max_idle_seconds)
     , connect_timeout_(connect_timeout)
     , ssl_context_(nullptr)
-    , stop_(false) {
+    , stop_(false),
+    defaultSettings_(),pollSocket_(std::make_unique<PollSocket>()) {
     std::cerr << "[DEBUG] ConnectionManager: Initializing..." << std::endl;
     
     SSL_library_init();
@@ -181,7 +187,14 @@ std::shared_ptr<Connection> ConnectionManager::createNewConnection(
     const std::string& host,
     uint16_t port,
     bool use_tls) {
+    int sockfd = ::socket(AF_INET,SOCK_STREAM,0);
+    if(sockfd < 0){
+        return nullptr;
+    }
+    TCPSettings settings;
+    applyTCPSettings(sockfd,settings);
     auto conn = std::make_shared<Connection>(host, port, use_tls);
+    conn->setSocket(sockfd);
     if (use_tls) {
         conn->setSSLContext(ssl_context_);
     }
@@ -190,5 +203,57 @@ std::shared_ptr<Connection> ConnectionManager::createNewConnection(
     }
     return conn;
 }
-
+void ConnectionManager::applyTCPSettings(int fd, const TCPSettings& settings) {
+    // 非阻塞模式
+    if (settings.nonBlocking > 0) {
+        int flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    }
+    
+    // TCP_NODELAY（禁用 Nagle 算法）
+    if (settings.noDelay > 0) {
+        setsockopt(fd, SOL_TCP, TCP_NODELAY, &settings.noDelay, sizeof(settings.noDelay));
+    }
+    
+    // SO_KEEPALIVE
+    if (settings.keepAlive > 0) {
+        setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &settings.keepAlive, sizeof(settings.keepAlive));
+    }
+    
+    // TCP_KEEPIDLE
+    if (settings.keepIdle > 0) {
+        setsockopt(fd, SOL_TCP, TCP_KEEPIDLE, &settings.keepIdle, sizeof(settings.keepIdle));
+    }
+    
+    // TCP_KEEPINTVL
+    if (settings.keepIntvl > 0) {
+        setsockopt(fd, SOL_TCP, TCP_KEEPINTVL, &settings.keepIntvl, sizeof(settings.keepIntvl));
+    }
+    
+    // TCP_KEEPCNT
+    if (settings.keepCnt > 0) {
+        setsockopt(fd, SOL_TCP, TCP_KEEPCNT, &settings.keepCnt, sizeof(settings.keepCnt));
+    }
+    
+    // SO_RCVBUF
+    if (settings.recvBuffer > 0) {
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &settings.recvBuffer, sizeof(settings.recvBuffer));
+    }
+    
+    // SO_REUSEPORT
+    if (settings.reusePorts > 0) {
+        setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &settings.reusePorts, sizeof(settings.reusePorts));
+    }
+    
+    // TCP_LINGER2
+    if (settings.linger > 0) {
+        setsockopt(fd, SOL_TCP, TCP_LINGER2, &settings.linger, sizeof(settings.linger));
+    }
+    
+    // SO_REUSEADDR
+    if (settings.reuse > 0) {
+        int flag = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
+    }
+}
 }  // namespace myblob::network

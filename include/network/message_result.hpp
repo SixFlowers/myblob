@@ -35,6 +35,8 @@ public:
     [[nodiscard]] bool success() const;
     [[nodiscard]] utils::DataVector<uint8_t>& getDataVector();
     [[nodiscard]] std::unique_ptr<utils::DataVector<uint8_t>> moveDataVector();
+    
+    void setState(MessageState state) { state_.store(state); }
 
 protected:
     std::unique_ptr<utils::DataVector<uint8_t>> dataVector_;

@@ -1,6 +1,7 @@
 #pragma once
 #include "../network/message_result.hpp"
 #include "../network/original_message.hpp"
+#include "../network/socket.hpp"
 #include "provider.hpp"
 #include <memory>
 #include <string>
@@ -12,6 +13,7 @@ namespace myblob::cloud {
 class Transaction {
 public:
     using message_vector_type = std::vector<std::unique_ptr<network::OriginalMessage>>;
+    using request_vector_type = std::vector<std::unique_ptr<network::Socket::Request>>;
     
     Transaction();
     
@@ -70,10 +72,15 @@ public:
     message_vector_type& getMessages() { return messages_; }
     
     const message_vector_type& getMessages() const { return messages_; }
-
+    void execute();
+    void executeAsync();
+    template<typename Callback>
+    void executeAsync(Callback&& callback);
 private:
     Provider* provider_{nullptr};
     message_vector_type messages_;
+    request_vector_type requestHolder_;
+    std::unique_ptr<network::ConnectionManager> connMgr_;
 };
 
 template <typename Callback>
@@ -143,5 +150,11 @@ bool Transaction::deleteObjectRequest(
     messages_.push_back(std::move(msg));
     return true;
 }
-
+template <typename Callback>
+void Transaction::executeAsync(Callback&& callback) {
+    std::thread([this,cb = std::forward<Callback>(callback)](){
+        execute();
+        cb();
+    }).detach();//分离线程，不阻塞
+}
 }  // namespace myblob::cloud

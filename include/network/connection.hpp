@@ -4,6 +4,7 @@
 #include <atomic>
 #include <openssl/ssl.h>
 #include <ctime>
+#include "tcp_settings.hpp"
 
 namespace myblob::network {
 
@@ -61,8 +62,17 @@ public:
         time_t now = time(nullptr);
         return (now - last_used_) > max_idle_seconds;
     }
+    
+    void setSocket(int fd) {
+        sockfd_ = fd;
+    }
+    
+    void setTCPSettings(const TCPSettings& settings);
+    
+    const TCPSettings& getTCPSettings() const { return tcpSettings_; }
 
 private:
+    TCPSettings tcpSettings_;
     std::string host_;
     uint16_t port_;
     bool use_tls_;

@@ -1,5 +1,8 @@
 #pragma once
 #include "connection.hpp"
+#include "network/socket.hpp"
+#include "network/poll_socket.hpp"
+#include "network/tcp_settings.hpp"
 #include <memory>
 #include <vector>
 #include <mutex>
@@ -42,6 +45,8 @@ public:
     };
     
     Stats getStats() const;
+    
+    PollSocket& getPollSocket() { return *pollSocket_; }
 
 private:
     std::shared_ptr<Connection> findExistingConnection(
@@ -56,6 +61,8 @@ private:
         bool use_tls
     );
     
+    void applyTCPSettings(int fd, const TCPSettings& settings);
+    
     std::vector<std::shared_ptr<Connection>> pool_;
     size_t max_connections_;
     int max_idle_seconds_;
@@ -64,6 +71,8 @@ private:
     void* ssl_context_;
     std::atomic<bool> stop_;
     std::condition_variable cond_;
+    std::unique_ptr<PollSocket> pollSocket_;//poll多路复用器
+    TCPSettings defaultSettings_;//默认TCP配置
 };
 
 }  // namespace myblob::network

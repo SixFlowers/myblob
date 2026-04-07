@@ -1,4 +1,5 @@
 #include "network/connection.hpp"
+#include "network/connection_manager.hpp"
 #include "utils/defer.hpp"
 #include <cerrno>
 #include <cstring>
@@ -130,6 +131,10 @@ void Connection::disconnect() {
     
     connected_ = false;
     state_.store(ConnectionState::CLOSED);
+}
+
+void Connection::setTCPSettings(const TCPSettings& settings) {
+    tcpSettings_ = settings;
 }
 
 }  // namespace myblob::network

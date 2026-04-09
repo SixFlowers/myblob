@@ -39,3 +39,21 @@
 
 # debug information files
 *.dwo
+
+# Build directory
+build/
+
+# CMake cache
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# Downloaded/test files
+downloaded_file
+
+# OS files
+.DS_Store
+Thumbs.db

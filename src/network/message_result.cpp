@@ -29,9 +29,19 @@ namespace myblob::network {
     return dataVector_ ? dataVector_->data() : nullptr;
   }
   uint64_t MessageResult::getSize() const {
+    if (dataVector_) {
+        return dataVector_->size();
+    }
     return response_ ? response_->length : 0;
   }
   uint64_t MessageResult::getOffset() const {
+    if (dataVector_ && dataVector_->size() > 4) {
+        std::string_view sv(reinterpret_cast<const char*>(dataVector_->cdata()), dataVector_->size());
+        auto pos = sv.find("\r\n\r\n");
+        if (pos != std::string_view::npos) {
+            return pos + 4;
+        }
+    }
     return response_ ? response_->headerLength : 0;
   }
   MessageState MessageResult::getState() const{

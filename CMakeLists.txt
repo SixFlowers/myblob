@@ -27,5 +27,11 @@ add_executable(simple_download example/sync_example.cpp ${SOURCES})
 
 add_executable(batch_example example/batch_example.cpp ${SOURCES})
 
+add_executable(httpbin_example example/httpbin_example.cpp ${SOURCES})
+
+add_executable(httpbin_https_example example/httpbin_https_example.cpp ${SOURCES})
+
 target_link_libraries(simple_download OpenSSL::SSL OpenSSL::Crypto pthread)
 target_link_libraries(batch_example OpenSSL::SSL OpenSSL::Crypto pthread)
+target_link_libraries(httpbin_example OpenSSL::SSL OpenSSL::Crypto pthread)
+target_link_libraries(httpbin_https_example OpenSSL::SSL OpenSSL::Crypto pthread)

@@ -77,7 +77,7 @@ TLSConnection::Progress TLSConnection::operationHelper(
             case SSL_ERROR_WANT_READ: {
                 _state.progress = Progress::SendingInit;
                 if (process(connectionManager) != Progress::Aborted)
-                    return Progress::Progress;
+                    return Progress::InProgress;
                 return Progress::Aborted;
             }
             default: {
@@ -90,7 +90,7 @@ TLSConnection::Progress TLSConnection::operationHelper(
     } else {
         process(connectionManager);
         if (_state.progress != Progress::Finished && _state.progress != Progress::Aborted)
-            return Progress::Progress;
+            return Progress::InProgress;
         else
             return operationHelper(connectionManager, func, result);
     }

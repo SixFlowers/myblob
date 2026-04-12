@@ -22,6 +22,10 @@ set(SOURCES
     src/network/http_helper.cpp
     src/network/poll_socket.cpp
     src/network/tasked_send_receiver.cpp
+    # 第八版新增文件
+    src/network/cache.cpp
+    src/network/throughput_cache.cpp
+    src/network/io_uring_socket.cpp  # io_uring 支持
     # 暂时注释掉有问题的 TLS 文件
     # src/network/tls_connection.cpp
     # src/network/tls_context.cpp
@@ -38,8 +42,8 @@ add_executable(tasked_example example/tasked_example.cpp ${SOURCES})
 # httpbin_https_example 需要 TLS 支持，暂时不编译
 # add_executable(httpbin_https_example example/httpbin_https_example.cpp ${SOURCES})
 
-target_link_libraries(simple_download OpenSSL::SSL OpenSSL::Crypto pthread)
-target_link_libraries(batch_example OpenSSL::SSL OpenSSL::Crypto pthread)
-target_link_libraries(httpbin_example OpenSSL::SSL OpenSSL::Crypto pthread)
-target_link_libraries(tasked_example OpenSSL::SSL OpenSSL::Crypto pthread)
+target_link_libraries(simple_download OpenSSL::SSL OpenSSL::Crypto pthread uring)
+target_link_libraries(batch_example OpenSSL::SSL OpenSSL::Crypto pthread uring)
+target_link_libraries(httpbin_example OpenSSL::SSL OpenSSL::Crypto pthread uring)
+target_link_libraries(tasked_example OpenSSL::SSL OpenSSL::Crypto pthread uring)
 # target_link_libraries(httpbin_https_example OpenSSL::SSL OpenSSL::Crypto pthread)

@@ -3,15 +3,18 @@
 #include "network/socket.hpp"
 #include "network/poll_socket.hpp"
 #include "network/tcp_settings.hpp"
+#include "network/cache.hpp"
 #include <memory>
 #include <vector>
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
 #include <atomic>
-
+#ifdef MYBLOB_HAS_IO_URING
+#include "network/io_uring_socket.hpp"
+#endif
 namespace myblob::network {
-
+class ThroughputCache;
 class ConnectionManager {
 public:
     explicit ConnectionManager(
@@ -46,7 +49,12 @@ public:
     
     Stats getStats() const;
     
-    PollSocket& getPollSocket() { return *pollSocket_; }
+    PollSocket& getPollSocket();
+    bool isUsingIoUring() const {
+        return usingIoUring_;
+    }
+    Socket& getSocket() { return *socket_; }
+    void enableThroughputCache();
 
 private:
     std::shared_ptr<Connection> findExistingConnection(
@@ -71,8 +79,12 @@ private:
     void* ssl_context_;
     std::atomic<bool> stop_;
     std::condition_variable cond_;
-    std::unique_ptr<PollSocket> pollSocket_;//poll多路复用器
+    //std::unique_ptr<PollSocket> pollSocket_;//poll多路复用器
     TCPSettings defaultSettings_;//默认TCP配置
+    std::unique_ptr<Socket> socket_;
+    std::unique_ptr<PollSocket> fallbackPollSocket_;  // io_uring 模式下的备用 PollSocket
+    std::unique_ptr<Cache> cache_;
+    bool usingIoUring_ = false;
 };
 
 }  // namespace myblob::network

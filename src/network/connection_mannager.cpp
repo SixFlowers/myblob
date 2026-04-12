@@ -1,4 +1,5 @@
 #include "network/connection_manager.hpp"
+#include "network/throughput_cache.hpp"
 #include "utils/defer.hpp"
 #include <openssl/ssl.h>
 #include <algorithm>
@@ -10,7 +11,6 @@
 #include <unistd.h>
 
 namespace myblob::network {
-
 ConnectionManager::ConnectionManager(
     size_t max_connections,
     int max_idle_seconds,
@@ -20,7 +20,7 @@ ConnectionManager::ConnectionManager(
     , connect_timeout_(connect_timeout)
     , ssl_context_(nullptr)
     , stop_(false),
-    defaultSettings_(),pollSocket_(std::make_unique<PollSocket>()) {
+    defaultSettings_(),socket_(nullptr),usingIoUring_(false) {
     std::cerr << "[DEBUG] ConnectionManager: Initializing..." << std::endl;
     
     SSL_library_init();
@@ -30,7 +30,22 @@ ConnectionManager::ConnectionManager(
     if (!ssl_context_) {
         throw std::runtime_error("Failed to create SSL context");
     }
-    
+    #ifdef MYBLOB_HAS_IO_URING
+    try{
+        socket_ = std::make_unique<IOUringSocket>(1024);
+        usingIoUring_ = true;
+    }catch(const std::exception&e){
+        std::cerr << "[WARN] io_uring init failed: " << e.what() 
+                  << ", falling back to poll" << std::endl;
+        socket_ = std::make_unique<PollSocket>();
+        usingIoUring_ =false;
+    }
+    #else
+    socket_ = std::make_unique<PollSocket>();
+    usingIoUring_ = false;
+    std::cout << "[INFO] ConnectionManager: Using poll (io_uring not available)"
+              << std::endl;
+    #endif
     std::cerr << "[DEBUG] ConnectionManager: Initialized (max_connections=" 
               << max_connections_ << ")" << std::endl;
 }
@@ -203,6 +218,9 @@ std::shared_ptr<Connection> ConnectionManager::createNewConnection(
     }
     return conn;
 }
+void ConnectionManager::enableThroughputCache() {
+    cache_ = std::make_unique<ThroughputCache>();   
+}
 void ConnectionManager::applyTCPSettings(int fd, const TCPSettings& settings) {
     // 非阻塞模式
     if (settings.nonBlocking > 0) {
@@ -256,4 +274,18 @@ void ConnectionManager::applyTCPSettings(int fd, const TCPSettings& settings) {
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
     }
 }
+
+PollSocket& ConnectionManager::getPollSocket() {
+    // 如果当前使用的是 PollSocket，直接返回
+    if (!usingIoUring_) {
+        return *static_cast<PollSocket*>(socket_.get());
+    }
+    // 如果使用的是 IOUringSocket，创建一个备用的 PollSocket
+    // 用于兼容旧代码（如 Transaction）
+    if (!fallbackPollSocket_) {
+        fallbackPollSocket_ = std::make_unique<PollSocket>();
+    }
+    return *fallbackPollSocket_;
+}
+
 }  // namespace myblob::network

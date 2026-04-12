@@ -2,6 +2,14 @@
 #include <chrono>
 #include <cstdint>
 
+// 自动检测 io_uring 支持
+#ifdef __has_include
+#if __has_include(<liburing.h>)
+#define MYBLOB_HAS_IO_URING 1
+#include <liburing.h>
+#endif
+#endif
+
 namespace myblob::network {
 class Socket{
 public:
@@ -20,6 +28,12 @@ public:
         int32_t fd;
         EventType event;
         void* userData;
+
+        // ✅ 关键：io_uring 需要的内核级超时
+        // 只在支持 io_uring 时编译
+        #ifdef MYBLOB_HAS_IO_URING
+        __kernel_timespec kernelTimeout = {.tv_sec = 0, .tv_nsec = 0};
+        #endif
     };
     
     virtual ~Socket() = default;

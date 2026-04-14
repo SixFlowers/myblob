@@ -121,7 +121,11 @@ void Transaction::execute(){
         }
     }
 }
+
 void Transaction::executeAsync() {
-    executeAsync([]() {});
+    std::thread([this]() {
+        execute();
+    }).detach();
 }
+
 }  // namespace myblob::cloud

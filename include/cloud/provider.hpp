@@ -1,57 +1,58 @@
 #pragma once
 #include "cloud_service.hpp"
 #include "../network/http_client.hpp"
-#include "../network/connection_manager.hpp"
+#include "../network/http_response.hpp"
 #include "../utils/data_vector.hpp"
+#include <functional>
 #include <memory>
 #include <string>
-#include <string_view>
-#include <utility>
+#include <unordered_map>
 
-namespace myblob::cloud {
+namespace myblob {
+
+namespace network {
+class ConnectionManager;
+class TaskedSendReceiverHandle;
+}
+
+namespace cloud {
 
 class Provider {
 public:
-    static constexpr const char* remoteFile[] = {
-        "https://",
-        "http://",
-        "s3://",
-        "azure://",
-        "gs://",
-        "oci://",
-        "ibm://",
-        "minio://"
+    // 使用cloud_service.hpp中定义的CloudService
+    using CloudService = myblob::cloud::CloudService;
+
+    // 实例信息结构体
+    struct Instance {
+        std::string region;
+        std::string zone;
+        std::string type;
+        std::string id;
+        std::string address;
+        uint16_t port = 0;
     };
-    
-    static constexpr size_t remoteFileCount = 8;
-    
-    explicit Provider(network::ConnectionManager& conn_mgr,
-                      network::HttpClient& http_client,
-                      CloudService type = CloudService::HTTPS);
-    
-    Provider(const std::string& addr, uint16_t port, 
-             network::ConnectionManager& conn_mgr,
-             network::HttpClient& http_client,
+
+    // 静态成员
+    static bool testEnviornment;
+
+    // 构造函数
+    Provider(myblob::network::ConnectionManager& conn_mgr,
+             myblob::network::HttpClient& http_client,
              CloudService type);
     
+    Provider(const std::string& addr, uint16_t port,
+             myblob::network::ConnectionManager& conn_mgr,
+             myblob::network::HttpClient& http_client,
+             CloudService type);
+
     virtual ~Provider() = default;
-    
-    static std::unique_ptr<Provider> makeProvider(
-        const std::string& url,
-        bool https = false,
-        const std::string& access_key = "",
-        const std::string& secret_key = "",
-        void* send_receiver_handle = nullptr
-    );
-    
-    static bool isRemoteFile(const std::string& url);
-    
-    static CloudService getCloudService(const std::string& url);
-    
+
+    // 纯虚函数
     virtual std::unique_ptr<utils::DataVector<uint8_t>> getRequest(
         const std::string& filePath,
         const std::pair<uint64_t, uint64_t>& range = {0, 0}
     ) const = 0;
+    
     virtual std::unique_ptr<utils::DataVector<uint8_t>> putRequest(
         const std::string& filePath,
         std::string_view object
@@ -60,27 +61,87 @@ public:
     virtual std::unique_ptr<utils::DataVector<uint8_t>> deleteRequest(
         const std::string& filePath
     ) const = 0;
+
+    // AWS需要的额外虚函数
+    virtual std::unique_ptr<utils::DataVector<uint8_t>> putRequestGeneric(
+        const std::string& filePath,
+        std::string_view object,
+        uint16_t part,
+        std::string_view uploadId
+    ) const = 0;
     
-    virtual std::string getAddress() const { return address_; }
+    virtual std::unique_ptr<utils::DataVector<uint8_t>> createMultiPartRequest(
+        const std::string& filePath
+    ) const = 0;
     
-    virtual uint16_t getPort() const { return port_; }
+    virtual std::unique_ptr<utils::DataVector<uint8_t>> completeMultiPartRequest(
+        const std::string& filePath,
+        std::string_view uploadId,
+        const std::vector<std::string>& etags,
+        std::string& content
+    ) const = 0;
+    
+    virtual std::unique_ptr<utils::DataVector<uint8_t>> resignRequest(
+        const utils::DataVector<uint8_t>& data,
+        const uint8_t* bodyData = nullptr,
+        uint64_t bodyLength = 0
+    ) const = 0;
+    
+    virtual uint64_t multipartUploadSize() const = 0;
+    
+    virtual Instance getInstanceDetails(myblob::network::TaskedSendReceiverHandle& sendReceiver) = 0;
+    
+    virtual void initCache(myblob::network::TaskedSendReceiverHandle& sendReceiverHandle) = 0;
+    
+    virtual std::string getAddress() const = 0;
+    
+    virtual uint16_t getPort() const = 0;
     
     virtual CloudService getType() const { return type_; }
-    
-    bool isHTTPS() const { return type_ == CloudService::HTTPS; }
-    
-    network::HttpResponse download(
-        const std::string& file_path,
-        uint64_t offset = 0,
-        uint64_t length = 0
+
+    // 下载方法
+    myblob::network::HttpResponse download(const std::string& file_path,
+                                          uint64_t offset = 0,
+                                          uint64_t length = 0);
+
+    // 静态工厂方法
+    static std::unique_ptr<Provider> createProvider(const RemoteInfo& info,
+                                                    myblob::network::ConnectionManager& conn_mgr,
+                                                    myblob::network::HttpClient& http_client);
+
+    // 旧的工厂方法（向后兼容）
+    static std::unique_ptr<Provider> makeProvider(
+        const std::string& url,
+        bool https = false,
+        const std::string& access_key = "",
+        const std::string& secret_key = "",
+        void* send_receiver_handle = nullptr
     );
+
+    // 辅助方法
+    static bool isRemoteFile(const std::string& url);
+    static CloudService getCloudService(const std::string& url);
+    static std::string getCloudServiceName(CloudService service);
+    static std::string getCloudServiceName(const std::string& url);
     
+    bool isHTTPS() const {
+        return type_ == CloudService::HTTPS || type_ == CloudService::AWS ||
+               type_ == CloudService::Azure || type_ == CloudService::GCP ||
+               type_ == CloudService::Oracle || type_ == CloudService::IBM ||
+               type_ == CloudService::MinIO;
+    }
+
 protected:
-    network::ConnectionManager* conn_mgr_ = nullptr;
-    network::HttpClient* http_client_ = nullptr;
+    myblob::network::ConnectionManager* conn_mgr_ = nullptr;
+    myblob::network::HttpClient* http_client_ = nullptr;
     std::string address_;
-    uint16_t port_;
+    uint16_t port_ = 0;
     CloudService type_;
+    CloudService _type;
+
+    virtual void initSecret(myblob::network::TaskedSendReceiverHandle& sendReceiverHandle) = 0;
+    virtual void getSecret() = 0;
 };
 
-}  // namespace myblob::cloud
+} // namespace cloud
+} // namespace myblob

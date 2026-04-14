@@ -1,4 +1,3 @@
-
 #pragma once
 #include "../utils/data_vector.hpp"
 #include "../utils/defer.hpp"
@@ -8,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace myblob::network {
@@ -29,5 +29,28 @@ namespace myblob::network {
       Method method = Method::GET;
       Type type = Type::HTTP_1_1;
       std::string path;
+
+      /// Get the request method
+      static constexpr auto getRequestMethod(const Method& method) {
+          switch (method) {
+              case Method::GET: return "GET";
+              case Method::PUT: return "PUT";
+              case Method::POST: return "POST";
+              case Method::DELETE: return "DELETE";
+              default: return "";
+          }
+      }
+      /// Get the request type
+      static constexpr auto getRequestType(const Type& type) {
+          switch (type) {
+              case Type::HTTP_1_0: return "HTTP/1.0";
+              case Type::HTTP_1_1: return "HTTP/1.1";
+              default: return "";
+          }
+      }
+      /// Serialize the request
+      [[nodiscard]] static std::unique_ptr<utils::DataVector<uint8_t>> serialize(const HttpRequest& request);
+      /// Deserialize the request
+      [[nodiscard]] static HttpRequest deserialize(std::string_view data);
   };
 }

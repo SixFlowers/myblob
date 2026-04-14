@@ -22,6 +22,12 @@ namespace myblob::network {
     }
     return std::string_view(reinterpret_cast<const char*>(dataVector_->cdata()),dataVector_->size());
   }
+  std::string_view MessageResult::getResult() {
+    if(!dataVector_ || dataVector_->size() == 0){
+      return {};
+    }
+    return std::string_view(reinterpret_cast<const char*>(dataVector_->cdata()),dataVector_->size());
+  }
   const uint8_t* MessageResult::getData() const{
     return dataVector_ ? dataVector_->cdata() : nullptr;
   }

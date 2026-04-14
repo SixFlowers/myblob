@@ -22,8 +22,10 @@ struct RemoteInfo {
     std::string bucket = "";
     std::string region = "";
     std::string endpoint = "";
+    std::string path = "";
     uint16_t port = 80;
     bool https = true;
+    bool zonal = false;
 };
 
 inline RemoteInfo parseRemoteInfo(const std::string& url) {
@@ -44,8 +46,23 @@ inline RemoteInfo parseRemoteInfo(const std::string& url) {
     }
     else if (url.find("s3://") == 0) {
         info.provider = CloudService::AWS;
+        info.https = true;
         info.port = 443;
         prefix_len = 5;
+        
+        // 解析 s3://bucket-name/path 格式
+        std::string remaining = url.substr(prefix_len);
+        size_t slash_pos = remaining.find('/');
+        if (slash_pos != std::string::npos) {
+            info.bucket = remaining.substr(0, slash_pos);
+            info.path = remaining.substr(slash_pos + 1);
+        } else {
+            info.bucket = remaining;
+        }
+        // 默认使用 AWS S3 标准端点
+        info.endpoint = info.bucket + ".s3.amazonaws.com";
+        info.region = "us-east-1";  // 默认区域
+        return info;
     }
     else if (url.find("azure://") == 0) {
         info.provider = CloudService::Azure;
@@ -96,6 +113,11 @@ inline RemoteInfo parseRemoteInfo(const std::string& url) {
             info.port = static_cast<uint16_t>(std::stoi(port_str));
         } else {
             info.endpoint = host_port;
+        }
+        
+        // 提取路径
+        if (slash_pos != std::string::npos) {
+            info.path = remaining.substr(slash_pos + 1);
         }
     }
     

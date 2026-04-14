@@ -12,6 +12,7 @@ set(SOURCES
     src/cloud/provider.cpp
     src/cloud/http_provider.cpp
     src/cloud/transaction.cpp
+    src/cloud/aws.cpp                 # 第九版：AWS Provider
     src/network/http_client.cpp
     src/network/connection.cpp
     src/network/connection_mannager.cpp
@@ -22,6 +23,8 @@ set(SOURCES
     src/network/http_helper.cpp
     src/network/poll_socket.cpp
     src/network/tasked_send_receiver.cpp
+    src/network/aws_signer.cpp        # 第九版：AWS 签名
+    src/utils/utils.cpp               # 第九版：工具函数
     # 第八版新增文件
     src/network/cache.cpp
     src/network/throughput_cache.cpp
@@ -42,8 +45,16 @@ add_executable(tasked_example example/tasked_example.cpp ${SOURCES})
 # httpbin_https_example 需要 TLS 支持，暂时不编译
 # add_executable(httpbin_https_example example/httpbin_https_example.cpp ${SOURCES})
 
+# 第九版：AWS 测试程序
+add_executable(aws1_example example/aws1_example.cpp ${SOURCES})
+add_executable(aws2_example example/aws2_example.cpp ${SOURCES})
+add_executable(aws3_example example/aws3.example.cpp ${SOURCES})
+
 target_link_libraries(simple_download OpenSSL::SSL OpenSSL::Crypto pthread uring)
 target_link_libraries(batch_example OpenSSL::SSL OpenSSL::Crypto pthread uring)
 target_link_libraries(httpbin_example OpenSSL::SSL OpenSSL::Crypto pthread uring)
 target_link_libraries(tasked_example OpenSSL::SSL OpenSSL::Crypto pthread uring)
+target_link_libraries(aws1_example OpenSSL::SSL OpenSSL::Crypto pthread uring)
+target_link_libraries(aws2_example OpenSSL::SSL OpenSSL::Crypto pthread uring)
+target_link_libraries(aws3_example OpenSSL::SSL OpenSSL::Crypto pthread uring)
 # target_link_libraries(httpbin_https_example OpenSSL::SSL OpenSSL::Crypto pthread)

@@ -42,18 +42,37 @@
 
 # Build directory
 build/
+build-*/
 
 # CMake cache
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 Makefile
-*.cmake
-!CMakeLists.txt
+CTestTestfile.cmake
+_deps/
 
-# Downloaded/test files
-downloaded_file
-
-# OS files
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 .DS_Store
-Thumbs.db
+
+# Backup files
+*.bak
+*.orig
+
+# Documentation generated files
+docs/html/
+docs/latex/
+
+# Test outputs
+*.log
+test_results/
+
+# Temporary files
+tmp/
+temp/
+*.tmp

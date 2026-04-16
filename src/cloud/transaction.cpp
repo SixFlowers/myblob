@@ -23,7 +23,8 @@ bool Transaction::getObjectRequest(
     const std::string& remotePath,
     std::pair<uint64_t, uint64_t> range,
     uint8_t* result,
-    uint64_t capacity
+    uint64_t capacity,
+    uint64_t traceId
 ) {
     if (!provider_) {
         return false;
@@ -37,6 +38,70 @@ bool Transaction::getObjectRequest(
     );
     
     messages_.push_back(std::move(msg));
+    return true;
+}
+
+bool Transaction::putObjectRequest(
+    const std::string& remotePath,
+    const char* data,
+    uint64_t size,
+    uint8_t* result,
+    uint64_t capacity,
+    uint64_t traceId
+) {
+    if (!provider_) {
+        return false;
+    }
+    
+    auto msg = std::make_unique<network::OriginalMessage>(
+        provider_->putRequest(remotePath, std::string_view(data, size)),
+        *provider_,
+        result,
+        capacity
+    );
+    
+    messages_.push_back(std::move(msg));
+    return true;
+}
+
+bool Transaction::deleteObjectRequest(
+    const std::string& remotePath,
+    uint8_t* result,
+    uint64_t capacity,
+    uint64_t traceId
+) {
+    if (!provider_) {
+        return false;
+    }
+    
+    auto msg = std::make_unique<network::OriginalMessage>(
+        provider_->deleteRequest(remotePath),
+        *provider_,
+        result,
+        capacity
+    );
+    
+    messages_.push_back(std::move(msg));
+    return true;
+}
+
+void Transaction::processSync(network::TaskedSendReceiverHandle& sendReceiverHandle) {
+    // 使用新的消息任务系统处理
+    for (auto& msg : messages_) {
+        if (msg->result.getState() == network::MessageState::Init) {
+            sendReceiverHandle.sendSync(msg.get());
+        }
+    }
+    sendReceiverHandle.processSync();
+}
+
+bool Transaction::processAsync(network::TaskedSendReceiverGroup& group) {
+    // 异步处理所有消息
+    for (auto& msg : messages_) {
+        if (!group.send(msg.get())) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -126,6 +191,23 @@ void Transaction::executeAsync() {
     std::thread([this]() {
         execute();
     }).detach();
+}
+
+// 迭代器实现
+Transaction::Iterator Transaction::begin() {
+    return Iterator(messages_.begin());
+}
+
+Transaction::Iterator Transaction::end() {
+    return Iterator(messages_.end());
+}
+
+Transaction::ConstIterator Transaction::cbegin() const {
+    return ConstIterator(messages_.cbegin());
+}
+
+Transaction::ConstIterator Transaction::cend() const {
+    return ConstIterator(messages_.cend());
 }
 
 }  // namespace myblob::cloud

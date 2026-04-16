@@ -321,20 +321,4 @@ void TaskedSendReceiver::reset() {
   _stopDeamon = false;
 }
 
-std::unique_ptr<MessageTask> MessageTask::buildMessageTask(
-    OriginalMessage* msg,
-    const TCPSettings& settings,
-    uint64_t chunkSize
-) {
-  auto task = std::make_unique<MessageTask>();
-  task->originalMessage = msg;
-  task->receiveBufferOffset = 0;
-  return task;
-}
-
-MessageState MessageTask::execute(ConnectionManager& connMgr) {
-    // 简化实现：实际中会处理 HTTP/HTTPS 消息
-    return MessageState::Finished;
-}
-
 }

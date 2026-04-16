@@ -37,8 +37,12 @@ public:
     [[nodiscard]] std::unique_ptr<utils::DataVector<uint8_t>> moveDataVector();
     
     void setState(MessageState state) { state_.store(state); }
+    void setFailureCode(uint16_t code) { failureCode_ = code; }
 
 protected:
+    friend struct HTTPMessage;
+    friend struct HTTPSMessage;
+    friend struct MessageTask;
     std::unique_ptr<utils::DataVector<uint8_t>> dataVector_;
     std::unique_ptr<HttpHelper::Info> response_;
     const MessageResult* originError_{nullptr};

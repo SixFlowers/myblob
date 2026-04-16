@@ -1,4 +1,5 @@
 #pragma once
+#include "network/message_task.hpp"
 #include "network/config.hpp"
 #include "network/connection_manager.hpp"
 #include "network/message_state.hpp"
@@ -174,17 +175,6 @@ public:
     return _sendReceiver != nullptr;
   }
   friend class TaskedSendReceiverGroup;
-};
-
-struct MessageTask{
-  OriginalMessage* originalMessage;
-  uint64_t receiveBufferOffset;
-  static std::unique_ptr<MessageTask> buildMessageTask(
-    OriginalMessage* msg,
-    const TCPSettings& settings,
-    uint64_t chunkSize
-  );
-  MessageState execute(ConnectionManager& connMgr);
 };
 
 }

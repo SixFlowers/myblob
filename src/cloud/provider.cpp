@@ -1,10 +1,17 @@
 #include "cloud/provider.hpp"
-#include "cloud/http_provider.hpp"
 #include "cloud/aws.hpp"
+#include "cloud/azure.hpp"
+#include "cloud/gcp.hpp"
+#include "cloud/minio.hpp"
+#include "cloud/http_provider.hpp"
+#include "network/config.hpp"
+#include <algorithm>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 
 namespace myblob::cloud {
-
+using namespace std;
 // 定义静态成员
 bool Provider::testEnviornment = false;
 
@@ -94,18 +101,19 @@ std::unique_ptr<Provider> Provider::createProvider(
             return std::make_unique<HTTPProvider>(
                 info.endpoint, info.port, info.https, conn_mgr, http_client);
         }
-        case CloudService::AWS:
+        case CloudService::AWS:{
+            return std::make_unique<AWS>(info,conn_mgr,http_client);
+        }
         case CloudService::MinIO:
         case CloudService::Oracle:
         case CloudService::IBM: {
             return std::make_unique<AWS>(info, conn_mgr, http_client);
         }
-        case CloudService::Azure:
+        case CloudService::Azure:{
+            return std::make_unique<Azure>(info, conn_mgr, http_client);
+        }
         case CloudService::GCP: {
-            std::cerr << "[ERROR] Provider not yet implemented: " 
-                      << static_cast<int>(info.provider) << std::endl;
-            std::cerr << "[INFO] This feature will be available in Version 3+" << std::endl;
-            return nullptr;
+            return std::make_unique<GCP>(info, conn_mgr, http_client);
         }
         default: {
             std::cerr << "[ERROR] Unsupported cloud service: " 
@@ -175,6 +183,23 @@ myblob::network::HttpResponse Provider::download(const std::string& file_path,
     }
 
     return response;
+}
+
+// 获取配置
+myblob::network::Config Provider::getConfig(myblob::network::TaskedSendReceiverHandle& sendReceiver) {
+    // 默认实现返回空配置
+    return myblob::network::Config{};
+}
+
+// 静态辅助方法
+std::string Provider::getETag(std::string_view header) {
+    // 默认实现返回空字符串
+    return "";
+}
+
+std::string Provider::getUploadId(std::string_view body) {
+    // 默认实现返回空字符串
+    return "";
 }
 
 }  // namespace myblob::cloud

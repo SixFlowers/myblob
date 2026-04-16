@@ -13,12 +13,27 @@ namespace myblob {
 namespace network {
 class ConnectionManager;
 class TaskedSendReceiverHandle;
+struct Config;
 }
 
 namespace cloud {
 
 class Provider {
 public:
+    /// 远程协议前缀数量
+    static constexpr unsigned remoteFileCount = 8;
+    
+    /// 远程协议前缀数组
+    static constexpr std::string_view remoteFile[] = {
+        "https://",     // HTTPS = 0
+        "http://",      // HTTP = 1
+        "s3://",        // AWS = 2
+        "azure://",     // Azure = 3  ✅ 新增
+        "gs://",        // GCP = 4     ✅ 新增
+        "oci://",       // Oracle = 5
+        "ibm://",       // IBM = 6
+        "minio://"      // MinIO = 7   ✅ 新增
+    };
     // 使用cloud_service.hpp中定义的CloudService
     using CloudService = myblob::cloud::CloudService;
 
@@ -98,6 +113,24 @@ public:
     virtual uint16_t getPort() const = 0;
     
     virtual CloudService getType() const { return type_; }
+
+    // 重签名支持
+    virtual bool supportsResigning() const { return false; }
+    
+    // 获取配置
+    virtual network::Config getConfig(network::TaskedSendReceiverHandle& sendReceiver);
+    
+    // 静态辅助方法
+    static std::string getETag(std::string_view header);
+    static std::string getUploadId(std::string_view body);
+    
+    // 通用删除请求（用于中止多部分上传）
+    virtual std::unique_ptr<utils::DataVector<uint8_t>> deleteRequestGeneric(
+        const std::string& filePath,
+        std::string_view uploadId) const {
+        // 默认实现返回空
+        return nullptr;
+    }
 
     // 下载方法
     myblob::network::HttpResponse download(const std::string& file_path,

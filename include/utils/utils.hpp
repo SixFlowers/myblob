@@ -8,6 +8,8 @@ namespace myblob::utils {
   std::string encodeUrlParameters(const std::string&encode);
   //Base64编码
   std::string base64Encode(const uint8_t*input,uint64_t length);
+  //Base64解码
+  std::pair<std::unique_ptr<uint8_t[]>,uint64_t> base64Decode(const uint8_t*input,uint64_t length);
   //哈希函数
   std::string sha256Encode(const uint8_t*data,uint64_t length);
   //MD5哈希编码

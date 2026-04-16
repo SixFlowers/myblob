@@ -1,17 +1,28 @@
 #pragma once
-#include "network/socket.hpp"
-#include "network/tcp_settings.hpp"
-#include "network/original_message.hpp"
-#include <cstdint>
+#include "network/http_message.hpp"
 
 namespace myblob::network {
 
-struct HTTPSMessage {
-    int fd;                          // Socket 文件描述符
-    uint64_t chunkSize;              // BIO 缓冲区大小
-    OriginalMessage* originalMessage; // 原始消息
-    TCPSettings tcpSettings;         // TCP 配置
-    Socket::Request* request;        // Socket 请求（指向 Request 对象的指针）
+class TLSConnection;
+class ConnectionManager;
+
+/// 实现HTTPS消息往返
+struct HTTPSMessage : public HTTPMessage {
+    /// TLS层
+    TLSConnection* tlsLayer;
+    /// 文件描述符
+    int32_t fd;
+
+    /// 构造函数
+    HTTPSMessage(OriginalMessage* sendingMessage, 
+                 TCPSettings& tcpSettings, 
+                 uint32_t chunksize);
+    /// 析构函数
+    ~HTTPSMessage() override = default;
+    /// 消息执行回调
+    MessageState execute(ConnectionManager& connectionManager) override;
+    /// 重置以重新开始
+    void reset(ConnectionManager& socket, bool aborted);
 };
 
-}
+} // namespace myblob::network

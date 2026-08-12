@@ -1,16 +1,17 @@
 #include "network/connection_manager.hpp"
 #include "network/throughput_cache.hpp"
 #include "utils/defer.hpp"
-#include <openssl/ssl.h>
 #include <algorithm>
 #include <iostream>
 #include <sys/socket.h>
 #include <netinet/tcp.h>
 #include <netinet/in.h>
 #include <fcntl.h>
+#include <mutex>
 #include <unistd.h>
 
 namespace myblob::network {
+
 ConnectionManager::ConnectionManager(
     size_t max_connections,
     int max_idle_seconds,
@@ -18,257 +19,243 @@ ConnectionManager::ConnectionManager(
     : max_connections_(max_connections)
     , max_idle_seconds_(max_idle_seconds)
     , connect_timeout_(connect_timeout)
-    , ssl_context_(nullptr)
-    , stop_(false),
-    defaultSettings_(),socket_(nullptr),usingIoUring_(false) {
-    std::cerr << "[DEBUG] ConnectionManager: Initializing..." << std::endl;
-    
-    SSL_library_init();
-    SSL_load_error_strings();
-    OpenSSL_add_all_algorithms();
-    ssl_context_ = SSL_CTX_new(TLS_client_method());
-    if (!ssl_context_) {
-        throw std::runtime_error("Failed to create SSL context");
-    }
-    #ifdef MYBLOB_HAS_IO_URING
-    try{
+    , stop_(false)
+    , defaultSettings_()
+    , tlsContext_(std::make_unique<TLSContext>())
+    , socket_(nullptr)
+    , usingIoUring_(false)
+{
+#ifdef MYBLOB_HAS_IO_URING
+    try {
         socket_ = std::make_unique<IOUringSocket>(1024);
         usingIoUring_ = true;
-    }catch(const std::exception&e){
-        std::cerr << "[WARN] io_uring init failed: " << e.what() 
-                  << ", falling back to poll" << std::endl;
+    } catch (const std::exception& e) {
         socket_ = std::make_unique<PollSocket>();
-        usingIoUring_ =false;
+        usingIoUring_ = false;
     }
-    #else
+#else
     socket_ = std::make_unique<PollSocket>();
     usingIoUring_ = false;
-    std::cout << "[INFO] ConnectionManager: Using poll (io_uring not available)"
-              << std::endl;
-    #endif
-    std::cerr << "[DEBUG] ConnectionManager: Initialized (max_connections=" 
-              << max_connections_ << ")" << std::endl;
+#endif
 }
 
 ConnectionManager::~ConnectionManager() {
     closeAll();
-    
-    if (ssl_context_) {
-        SSL_CTX_free(static_cast<SSL_CTX*>(ssl_context_));
-        ssl_context_ = nullptr;
-    }
-    
-    std::cerr << "[DEBUG] ConnectionManager: Destroyed" << std::endl;
 }
 
-std::shared_ptr<Connection> ConnectionManager::getConnection(
+/// 单线程获取连接：O(1) 从 idle_ map 查找，其次扫描 pool_ 空槽
+std::unique_ptr<Connection> ConnectionManager::getConnection(
     const std::string& host,
     uint16_t port,
-    bool use_tls) {
-    std::cerr << "[DEBUG] ConnectionManager::getConnection: " << host << ":" << port 
-              << " (TLS=" << use_tls << ")" << std::endl;
-    
-    std::unique_lock<std::mutex> lock(mutex_);
-    
-    cond_.wait(lock, [this]() {
-        if (stop_) {
-            return true;
-        }
-        for (auto& conn : pool_) {
-            if (conn->getState() == ConnectionState::IDLE) {
-                return true;
-            }
-        }
-        return pool_.size() < max_connections_;
-    });
-    
+    bool use_tls)
+{
     if (stop_) {
-        std::cerr << "[WARN] ConnectionManager is stopped" << std::endl;
         return nullptr;
     }
-    
-    auto conn = findExistingConnection(host, port, use_tls);
-    if (conn) {
-        std::cerr << "[DEBUG] Reusing existing connection" << std::endl;
+
+    // 第1步：从 idle_ map O(1) 查找匹配的空闲连接
+    auto key = makeKey(host, port, use_tls);
+    auto it = idle_.find(key);
+    if (it != idle_.end()) {
+        auto conn = std::move(it->second);
+        idle_.erase(it);
         conn->markUsed();
         return conn;
     }
-    
-    conn = createNewConnection(host, port, use_tls);
-    if (!conn) {
-        std::cerr << "[ERROR] Failed to create new connection" << std::endl;
-        return nullptr;
+
+    // 第2步：扫描 pool_ 中的 nullptr 空槽（连接被取走时留下的）
+    for (auto& slot : pool_) {
+        if (slot && slot->getState() == ConnectionState::IDLE
+            && slot->getHost() == host
+            && slot->getPort() == port
+            && slot->usesTLS() == use_tls)
+        {
+            auto conn = std::move(slot);  // slot 变为 nullptr
+            conn->markUsed();
+            return conn;
+        }
     }
-    
-    pool_.push_back(conn);
-    conn->markUsed();
-    return conn;
+
+    // 第3步：池未满则创建新连接（DNS + TCP 握手，单线程不阻塞任何人）
+    if (pool_.size() < max_connections_) {
+        auto conn = createNewConnection(host, port, use_tls);
+        if (conn) {
+            conn->markUsed();
+            pool_.push_back(nullptr);  // 占位（连接在工作，不在池中）
+        }
+        return conn;
+    }
+
+    // 池满：扫描所有槽位，清理已断开的连接腾空间
+    for (auto it = pool_.begin(); it != pool_.end(); ++it) {
+        if (*it && (*it)->getState() == ConnectionState::CLOSED) {
+            it = pool_.erase(it);
+            --it;
+        }
+    }
+    if (pool_.size() < max_connections_) {
+        auto conn = createNewConnection(host, port, use_tls);
+        if (conn) {
+            conn->markUsed();
+            pool_.push_back(nullptr);
+        }
+        return conn;
+    }
+
+    return nullptr;
 }
 
-void ConnectionManager::returnConnection(std::shared_ptr<Connection> conn) {
+/// 归还连接：如果连接完好，放入 idle_ map（O(1) 下次查找）；否则丢弃
+void ConnectionManager::returnConnection(std::unique_ptr<Connection> conn) {
     if (!conn) {
         return;
     }
-    
-    std::cerr << "[DEBUG] ConnectionManager::returnConnection: " << conn->getHost() 
-              << ":" << conn->getPort() << std::endl;
-    
-    std::lock_guard<std::mutex> lock(mutex_);
-    
-    if (conn->getState() == ConnectionState::CLOSED) {
-        auto it = std::find(pool_.begin(), pool_.end(), conn);
-        if (it != pool_.end()) {
-            pool_.erase(it);
-            std::cerr << "[DEBUG] Removed closed connection from pool" << std::endl;
+
+    if (conn->getState() == ConnectionState::CLOSED || !conn->isConnected()) {
+        // 连接已断，从 pool_ 移除对应槽位
+        for (auto it = pool_.begin(); it != pool_.end(); ++it) {
+            if (!*it) {
+                it = pool_.erase(it);
+                return;  // 找到并删除空槽
+            }
         }
         return;
     }
-    
+
+    // 连接完好：标记 IDLE，放入 idle_ map
     conn->markIdle();
-    cond_.notify_one();
+    auto key = makeKey(conn->getHost(), conn->getPort(), conn->usesTLS());
+    // 如果 idle_ 已有同 key 的连接，旧的先放回 pool_ 空槽
+    auto oldIt = idle_.find(key);
+    if (oldIt != idle_.end()) {
+        // 旧连接放回 pool_ 空槽或直接丢弃
+        bool placed = false;
+        for (auto& slot : pool_) {
+            if (!slot) {
+                slot = std::move(oldIt->second);
+                placed = true;
+                break;
+            }
+        }
+        idle_.erase(oldIt);
+        if (!placed) {
+            // pool_ 满，丢弃旧连接
+            oldIt->second.reset();
+        }
+    }
+    idle_[key] = std::move(conn);
 }
 
 void ConnectionManager::closeIdleConnections() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    
-    std::cerr << "[DEBUG] ConnectionManager::closeIdleConnections: pool size before=" 
-              << pool_.size() << std::endl;
-    
-    for (auto it = pool_.begin(); it != pool_.end();) {
-        auto& conn = *it;
-        if (conn->isIdleTooLong(max_idle_seconds_)) {
-            std::cerr << "[DEBUG] Closing idle connection to " << conn->getHost() << std::endl;
-            conn->disconnect();
-            it = pool_.erase(it);
+    // 清理 idle_ map 中过期连接
+    for (auto it = idle_.begin(); it != idle_.end();) {
+        if (it->second && it->second->isIdleTooLong(max_idle_seconds_)) {
+            it->second->disconnect();
+            it = idle_.erase(it);
         } else {
             ++it;
         }
     }
-    
-    std::cerr << "[DEBUG] ConnectionManager::closeIdleConnections: pool size after=" 
-              << pool_.size() << std::endl;
+    // 清理 pool_ 中 IDLE 过期的连接
+    for (auto& slot : pool_) {
+        if (slot && slot->getState() == ConnectionState::IDLE
+            && slot->isIdleTooLong(max_idle_seconds_))
+        {
+            slot->disconnect();
+            slot.reset();
+        }
+    }
 }
 
 void ConnectionManager::closeAll() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    
     stop_ = true;
-    cond_.notify_all();
-    
-    std::cerr << "[DEBUG] ConnectionManager::closeAll: closing " << pool_.size()
-              << " connections" << std::endl;
-    
-    for (auto& conn : pool_) {
-        conn->disconnect();
+    for (auto& kv : idle_) {
+        if (kv.second) kv.second->disconnect();
     }
-    
+    idle_.clear();
+    for (auto& conn : pool_) {
+        if (conn) conn->disconnect();
+    }
     pool_.clear();
 }
 
 ConnectionManager::Stats ConnectionManager::getStats() const {
-    Stats stats;
-    stats.total_connections = pool_.size();
+    Stats stats{};
     stats.max_connections = max_connections_;
-    stats.idle_connections = 0;
+    stats.idle_connections = idle_.size();
     stats.in_use_connections = 0;
-    
+    stats.total_connections = idle_.size();
+
     for (const auto& conn : pool_) {
-        if (conn->getState() == ConnectionState::IDLE) {
-            stats.idle_connections++;
-        } else if (conn->getState() == ConnectionState::IN_USE) {
-            stats.in_use_connections++;
+        if (conn) {
+            stats.total_connections++;
+            if (conn->getState() == ConnectionState::IDLE) {
+                stats.idle_connections++;
+            } else if (conn->getState() == ConnectionState::IN_USE) {
+                stats.in_use_connections++;
+            }
         }
     }
-    
     return stats;
 }
 
-std::shared_ptr<Connection> ConnectionManager::findExistingConnection(
+std::unique_ptr<Connection> ConnectionManager::createNewConnection(
     const std::string& host,
     uint16_t port,
-    bool use_tls) {
-    for (auto& conn : pool_) {
-        if (conn->getHost() == host && 
-            conn->getPort() == port &&
-            conn->getState() == ConnectionState::IDLE &&
-            conn->usesTLS() == use_tls) {
-            return conn;
-        }
-    }
-    return nullptr;
-}
-
-std::shared_ptr<Connection> ConnectionManager::createNewConnection(
-    const std::string& host,
-    uint16_t port,
-    bool use_tls) {
-    int sockfd = ::socket(AF_INET,SOCK_STREAM,0);
-    if(sockfd < 0){
-        return nullptr;
-    }
-    TCPSettings settings;
-    applyTCPSettings(sockfd,settings);
-    auto conn = std::make_shared<Connection>(host, port, use_tls);
-    conn->setSocket(sockfd);
-    if (use_tls) {
-        conn->setSSLContext(ssl_context_);
-    }
+    bool use_tls)
+{
+    auto conn = std::make_unique<Connection>(host, port, use_tls);
     if (!conn->connect()) {
         return nullptr;
     }
+    applyTCPSettings(conn->getSocket(), defaultSettings_);
     return conn;
 }
+
 void ConnectionManager::enableThroughputCache() {
-    cache_ = std::make_unique<ThroughputCache>();   
+    cache_ = std::make_unique<ThroughputCache>();
 }
+
 void ConnectionManager::applyTCPSettings(int fd, const TCPSettings& settings) {
-    // 非阻塞模式
     if (settings.nonBlocking > 0) {
         int flags = fcntl(fd, F_GETFL, 0);
-        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        if (flags != -1) {
+            fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        }
     }
-    
-    // TCP_NODELAY（禁用 Nagle 算法）
+
     if (settings.noDelay > 0) {
         setsockopt(fd, SOL_TCP, TCP_NODELAY, &settings.noDelay, sizeof(settings.noDelay));
     }
-    
-    // SO_KEEPALIVE
+
     if (settings.keepAlive > 0) {
         setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &settings.keepAlive, sizeof(settings.keepAlive));
     }
-    
-    // TCP_KEEPIDLE
+
     if (settings.keepIdle > 0) {
         setsockopt(fd, SOL_TCP, TCP_KEEPIDLE, &settings.keepIdle, sizeof(settings.keepIdle));
     }
-    
-    // TCP_KEEPINTVL
+
     if (settings.keepIntvl > 0) {
         setsockopt(fd, SOL_TCP, TCP_KEEPINTVL, &settings.keepIntvl, sizeof(settings.keepIntvl));
     }
-    
-    // TCP_KEEPCNT
+
     if (settings.keepCnt > 0) {
         setsockopt(fd, SOL_TCP, TCP_KEEPCNT, &settings.keepCnt, sizeof(settings.keepCnt));
     }
-    
-    // SO_RCVBUF
+
     if (settings.recvBuffer > 0) {
         setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &settings.recvBuffer, sizeof(settings.recvBuffer));
     }
-    
-    // SO_REUSEPORT
+
     if (settings.reusePorts > 0) {
         setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &settings.reusePorts, sizeof(settings.reusePorts));
     }
-    
-    // TCP_LINGER2
+
     if (settings.linger > 0) {
         setsockopt(fd, SOL_TCP, TCP_LINGER2, &settings.linger, sizeof(settings.linger));
     }
-    
-    // SO_REUSEADDR
+
     if (settings.reuse > 0) {
         int flag = 1;
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
@@ -276,14 +263,15 @@ void ConnectionManager::applyTCPSettings(int fd, const TCPSettings& settings) {
 }
 
 PollSocket& ConnectionManager::getPollSocket() {
-    // 如果当前使用的是 PollSocket，直接返回
     if (!usingIoUring_) {
         return *static_cast<PollSocket*>(socket_.get());
     }
-    // 如果使用的是 IOUringSocket，创建一个备用的 PollSocket
-    // 用于兼容旧代码（如 Transaction）
     if (!fallbackPollSocket_) {
-        fallbackPollSocket_ = std::make_unique<PollSocket>();
+        static std::mutex fallbackMutex;
+        std::lock_guard<std::mutex> lock(fallbackMutex);
+        if (!fallbackPollSocket_) {
+            fallbackPollSocket_ = std::make_unique<PollSocket>();
+        }
     }
     return *fallbackPollSocket_;
 }

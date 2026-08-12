@@ -43,7 +43,7 @@ unique_ptr<utils::DataVector<uint8_t>> AWS::buildRequest(
     if (initHeaders) {
         // 添加必须头部
         request.headers.emplace("Host", getAddress());
-        request.headers.emplace("x-amz-date", testEnviornment ? fakeAMZTimestamp : buildAMZTimestamp());
+        request.headers.emplace("x-amz-date", testEnvironment ? fakeAMZTimestamp : buildAMZTimestamp());
         if (!_settings.zonal) {
             // 添加请求付款人头部
             request.headers.emplace("x-amz-request-payer", "requester");

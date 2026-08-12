@@ -9,7 +9,7 @@ HTTPProvider::HTTPProvider(const std::string& addr, uint16_t port, bool https,
                          myblob::network::HttpClient& http_client)
     : Provider(addr, port, conn_mgr, http_client, 
                https ? CloudService::HTTPS : CloudService::HTTP) {
-    std::cerr << "[DEBUG] HTTPProvider: Created for " << addr << ":" << port << std::endl;
+    // HTTPProvider created (silenced for production)
 }
 
 std::unique_ptr<utils::DataVector<uint8_t>> HTTPProvider::getRequest(
@@ -45,11 +45,11 @@ std::unique_ptr<utils::DataVector<uint8_t>> HTTPProvider::putRequest(
     request_str += "Content-Length: " + std::to_string(object.size()) + "\r\n";
     request_str += "Connection: close\r\n";
     request_str += "\r\n";
-    
+
+    // 零拷贝：只返回请求头。请求体通过 OriginalMessage::putData 单独发送。
     size_t header_size = request_str.size();
-    request->resize(header_size + object.size());
+    request->resize(header_size);
     memcpy(request->data(), request_str.c_str(), header_size);
-    memcpy(request->data() + header_size, object.data(), object.size());
     return request;
 }
 
@@ -102,7 +102,9 @@ std::unique_ptr<utils::DataVector<uint8_t>> HTTPProvider::resignRequest(
     uint64_t bodyLength
 ) const {
     // HTTPProvider不需要重新签名
-    return std::make_unique<utils::DataVector<uint8_t>>(data);
+    auto result = std::make_unique<utils::DataVector<uint8_t>>(data.size());
+    std::memcpy(result->data(), data.cdata(), data.size());
+    return result;
 }
 
 uint64_t HTTPProvider::multipartUploadSize() const {

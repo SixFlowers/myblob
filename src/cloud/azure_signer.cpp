@@ -1,9 +1,7 @@
 #include "cloud/azure_signer.hpp"
 #include "utils/utils.hpp"
-#include <openssl/evp.h>
-#include <openssl/hmac.h>
 #include <algorithm>
-#include <iomanip>
+#include <map>
 #include <sstream>
 
 namespace myblob::cloud {
@@ -11,95 +9,99 @@ namespace myblob::cloud {
 using namespace std;
 
 string AzureSigner::createSignedRequest(
-    const string& serviceAccountEmail,
+    const string& accountName,
     const string& privateRSA,
     network::HttpRequest& request)
 {
-    stringstream stringToSign;
+    auto decodedKey = utils::base64Decode(
+        reinterpret_cast<const uint8_t*>(privateRSA.data()),
+        privateRSA.size());
 
-    // 1. HTTP verb
+    stringstream stringToSign;
     stringToSign << network::HttpRequest::getRequestMethod(request.method) << "\n";
 
-    // 2. Content-Encoding
-    stringToSign << "\n";
+    request.headers.emplace("x-ms-version", "2015-02-21");
 
-    // 3. Content-Language
-    stringToSign << "\n";
+    auto it = request.headers.find("Content-Encoding");
+    if (it != request.headers.end()) {
+        stringToSign << it->second << "\n";
+    } else {
+        stringToSign << "\n";
+    }
 
-    // 4. Content-Length
-    auto it = request.headers.find("Content-Length");
+    it = request.headers.find("Content-Language");
+    if (it != request.headers.end()) {
+        stringToSign << it->second << "\n";
+    } else {
+        stringToSign << "\n";
+    }
+
+    it = request.headers.find("Content-Length");
     if (it != request.headers.end()) {
         stringToSign << it->second;
     }
     stringToSign << "\n";
 
-    // 5. Content-MD5
-    stringToSign << "\n";
+    it = request.headers.find("Content-MD5");
+    stringToSign << (it != request.headers.end() ? it->second : "") << "\n";
+    it = request.headers.find("Content-Type");
+    stringToSign << (it != request.headers.end() ? it->second : "") << "\n";
+    it = request.headers.find("Date");
+    stringToSign << (it != request.headers.end() ? it->second : "") << "\n";
+    it = request.headers.find("If-Modified-Since");
+    stringToSign << (it != request.headers.end() ? it->second : "") << "\n";
+    it = request.headers.find("If-Match");
+    stringToSign << (it != request.headers.end() ? it->second : "") << "\n";
+    it = request.headers.find("If-None-Match");
+    stringToSign << (it != request.headers.end() ? it->second : "") << "\n";
+    it = request.headers.find("If-Unmodified-Since");
+    stringToSign << (it != request.headers.end() ? it->second : "") << "\n";
+    it = request.headers.find("Range");
+    stringToSign << (it != request.headers.end() ? it->second : "") << "\n";
 
-    // 6. Content-Type
-    stringToSign << "\n";
-
-    // 7. Date (使用 x-ms-date 代替)
-    stringToSign << "\n";
-
-    // 8. If-Modified-Since
-    stringToSign << "\n";
-
-    // 9. If-Match
-    stringToSign << "\n";
-
-    // 10. If-None-Match
-    stringToSign << "\n";
-
-    // 11. If-Unmodified-Since
-    stringToSign << "\n";
-
-    // 12. Range
-    stringToSign << "\n";
-
-    // 13. CanonicalizedHeaders (x-ms- 头部，按字母顺序)
-    vector<pair<string, string>> msHeaders;
+    map<string, string> sorted;
     for (const auto& h : request.headers) {
-        if (h.first.find("x-ms-") == 0) {
-            msHeaders.emplace_back(h.first, h.second);
+        string key = h.first;
+        transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
+            return static_cast<char>(tolower(c));
+        });
+        sorted.emplace(key, h.second);
+    }
+    for (const auto& h : sorted) {
+        if (h.first.rfind("x-ms-", 0) == 0) {
+            stringToSign << h.first << ":" << h.second << "\n";
         }
     }
-    sort(msHeaders.begin(), msHeaders.end());
-    for (const auto& h : msHeaders) {
-        stringToSign << h.first << ":" << h.second << "\n";
+
+    stringToSign << "/" << accountName << request.path;
+
+    stringstream query;
+    if (!request.queries.empty()) {
+        stringToSign << "\n";
+        auto qit = request.queries.begin();
+        while (qit != request.queries.end()) {
+            stringToSign << qit->first << ":" << qit->second;
+            query << utils::encodeUrlParameters(qit->first) << "=" << utils::encodeUrlParameters(qit->second);
+            if (++qit != request.queries.end()) {
+                stringToSign << "\n";
+                query << "&";
+            }
+        }
     }
 
-    // 14. CanonicalizedResource
-    stringToSign << "/" << serviceAccountEmail << request.path;
+    auto sign = utils::hmacSign(
+        decodedKey.first.get(),
+        decodedKey.second,
+        reinterpret_cast<const uint8_t*>(stringToSign.str().data()),
+        stringToSign.str().size());
 
-    // 构建待签名字符串
-    string stringToSignStr = stringToSign.str();
+    request.headers.emplace("Authorization", "SharedKey " + accountName + ":" + utils::base64Encode(sign.first.get(), sign.second));
 
-    // 解码 Base64 私钥
-    auto decodedKey = utils::base64Decode(
-        reinterpret_cast<const uint8_t*>(privateRSA.data()),
-        privateRSA.size());
-
-    // HMAC-SHA256 签名
-    unsigned int sigLen = 0;
-    uint8_t signature[EVP_MAX_MD_SIZE];
-
-    HMAC(EVP_sha256(),
-         decodedKey.first.get(),
-         static_cast<int>(decodedKey.second),
-         reinterpret_cast<const uint8_t*>(stringToSignStr.data()),
-         stringToSignStr.size(),
-         signature,
-         &sigLen);
-
-    // Base64 编码签名结果
-    string sigBase64 = utils::base64Encode(signature, sigLen);
-
-    // 构建 Authorization 头部
-    stringstream auth;
-    auth << "SharedKey " << serviceAccountEmail << ":" << sigBase64;
-
-    return auth.str();
+    string url = request.path.empty() ? "/" : request.path;
+    if (!request.queries.empty()) {
+        url += "?" + query.str();
+    }
+    return url;
 }
 
 }

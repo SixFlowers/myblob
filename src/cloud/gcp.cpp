@@ -6,11 +6,46 @@
 #include <chrono>
 #include <cstring>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 
 namespace myblob::cloud {
 
 using namespace std;
+
+// --- helper: serialize HttpRequest to DataVector (header only) ---
+static unique_ptr<utils::DataVector<uint8_t>> serializeRequest(
+    const network::HttpRequest& request)
+{
+    string raw;
+    raw += network::HttpRequest::getRequestMethod(request.method);
+    raw += " " + request.path + " ";
+    raw += string(network::HttpRequest::getRequestType(request.type)) + "\r\n";
+    for (const auto& h : request.headers)
+        raw += h.first + ": " + h.second + "\r\n";
+    raw += "\r\n";
+    auto data = make_unique<utils::DataVector<uint8_t>>(raw.size());
+    memcpy(data->data(), raw.data(), raw.size());
+    return data;
+}
+
+// --- helper: serialize HttpRequest + body into single DataVector ---
+static unique_ptr<utils::DataVector<uint8_t>> serializeRequestWithBody(
+    const network::HttpRequest& request, string_view body)
+{
+    string raw;
+    raw += network::HttpRequest::getRequestMethod(request.method);
+    raw += " " + request.path + " ";
+    raw += string(network::HttpRequest::getRequestType(request.type)) + "\r\n";
+    for (const auto& h : request.headers)
+        raw += h.first + ": " + h.second + "\r\n";
+    raw += "\r\n";
+    auto totalSize = raw.size() + body.size();
+    auto data = make_unique<utils::DataVector<uint8_t>>(totalSize);
+    memcpy(data->data(), raw.data(), raw.size());
+    memcpy(data->data() + raw.size(), body.data(), body.size());
+    return data;
+}
 
 static string buildAMZTimestamp()
 {
@@ -20,19 +55,31 @@ static string buildAMZTimestamp()
     return s.str();
 }
 
+static std::unique_ptr<utils::DataVector<uint8_t>> buildGCPInstanceRequest(const string& info)
+{
+    string httpHeader = "GET /computeMetadata/v1/instance/" + info + " HTTP/1.1\r\nHost: 169.254.169.254\r\nMetadata-Flavor: Google\r\n\r\n";
+    return make_unique<utils::DataVector<uint8_t>>(
+        reinterpret_cast<uint8_t*>(httpHeader.data()),
+        reinterpret_cast<uint8_t*>(httpHeader.data() + httpHeader.size())
+    );
+}
+
 unique_ptr<utils::DataVector<uint8_t>> GCP::getRequest(
     const string& filePath,
     const pair<uint64_t, uint64_t>& range) const
 {
+    if (!_secret) {
+        return nullptr;
+    }
     network::HttpRequest request;
     request.method = network::HttpRequest::Method::GET;
     request.type = network::HttpRequest::Type::HTTP_1_1;
 
-    request.path = "/" + _settings.bucket + "/" + filePath;
+    request.path = "/" + filePath;
+    request.queries.emplace("X-Goog-Date", testEnvironment ? fakeAMZTimestamp : buildAMZTimestamp());
 
     request.headers.emplace("Host", getAddress());
-    request.headers.emplace("x-amz-date",
-        testEnviornment ? fakeAMZTimestamp : buildAMZTimestamp());
+    request.headers.emplace("Content-Length", "0");
 
     if (range.first != range.second) {
         stringstream rangeString;
@@ -46,25 +93,18 @@ unique_ptr<utils::DataVector<uint8_t>> GCP::getRequest(
         .signedHeaders = "host"
     };
 
-    string authHeader = GCPSigner::createSignedRequest(
+    try {
+    request.path = GCPSigner::createSignedRequest(
         _secret->serviceAccountEmail,
         _secret->privateKey,
         request,
         stringToSign);
-
-    string httpHeader = network::HttpRequest::getRequestMethod(request.method);
-    httpHeader += " " + request.path + " ";
-    httpHeader += string(network::HttpRequest::getRequestType(request.type)) + "\r\n";
-
-    for (const auto& h : request.headers) {
-        httpHeader += h.first + ": " + h.second + "\r\n";
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] GCP sign failed: " << e.what() << std::endl;
+        return nullptr;
     }
-    httpHeader += "Authorization: " + authHeader + "\r\n";
-    httpHeader += "\r\n";
 
-    auto data = make_unique<utils::DataVector<uint8_t>>(httpHeader.size());
-    memcpy(static_cast<void*>(data->data()), httpHeader.data(), httpHeader.size());
-    return data;
+    return serializeRequest(request);
 }
 
 unique_ptr<utils::DataVector<uint8_t>> GCP::putRequestGeneric(
@@ -73,20 +113,24 @@ unique_ptr<utils::DataVector<uint8_t>> GCP::putRequestGeneric(
     uint16_t part,
     string_view uploadId) const
 {
+    if (!_secret) {
+        return nullptr;
+    }
     network::HttpRequest request;
     request.method = network::HttpRequest::Method::PUT;
     request.type = network::HttpRequest::Type::HTTP_1_1;
 
-    request.path = "/" + _settings.bucket + "/" + filePath;
+    request.path = "/" + filePath;
 
     if (part > 0) {
         request.queries.emplace("partNumber", to_string(part));
         request.queries.emplace("uploadId", uploadId);
     }
 
+    auto date = testEnvironment ? fakeAMZTimestamp : buildAMZTimestamp();
+    request.queries.emplace("X-Goog-Date", date);
     request.headers.emplace("Host", getAddress());
-    request.headers.emplace("x-amz-date",
-        testEnviornment ? fakeAMZTimestamp : buildAMZTimestamp());
+    request.headers.emplace("Date", date);
     request.headers.emplace("Content-Length", to_string(object.size()));
 
     GCPSigner::StringToSign stringToSign = {
@@ -95,46 +139,41 @@ unique_ptr<utils::DataVector<uint8_t>> GCP::putRequestGeneric(
         .signedHeaders = "host"
     };
 
-    string authHeader = GCPSigner::createSignedRequest(
+    try {
+    request.path = GCPSigner::createSignedRequest(
         _secret->serviceAccountEmail,
         _secret->privateKey,
         request,
         stringToSign);
-
-    string httpHeader = network::HttpRequest::getRequestMethod(request.method);
-    httpHeader += " " + request.path + " ";
-    httpHeader += string(network::HttpRequest::getRequestType(request.type)) + "\r\n";
-
-    for (const auto& h : request.headers) {
-        httpHeader += h.first + ": " + h.second + "\r\n";
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] GCP sign failed: " << e.what() << std::endl;
+        return nullptr;
     }
-    httpHeader += "Authorization: " + authHeader + "\r\n";
-    httpHeader += "\r\n";
 
-    auto totalSize = httpHeader.size() + object.size();
-    auto data = make_unique<utils::DataVector<uint8_t>>(totalSize);
-    memcpy(static_cast<void*>(data->data()), httpHeader.data(), httpHeader.size());
-    memcpy(static_cast<void*>(data->data() + httpHeader.size()), object.data(), object.size());
-    return data;
+    return serializeRequestWithBody(request, object);
 }
 
 unique_ptr<utils::DataVector<uint8_t>> GCP::deleteRequestGeneric(
     const string& filePath,
     string_view uploadId) const
 {
+    if (!_secret) {
+        return nullptr;
+    }
     network::HttpRequest request;
     request.method = network::HttpRequest::Method::DELETE;
     request.type = network::HttpRequest::Type::HTTP_1_1;
 
-    request.path = "/" + _settings.bucket + "/" + filePath;
+    request.path = "/" + filePath;
 
     if (!uploadId.empty()) {
         request.queries.emplace("uploadId", uploadId);
     }
 
+    auto date = testEnvironment ? fakeAMZTimestamp : buildAMZTimestamp();
+    request.queries.emplace("X-Goog-Date", date);
     request.headers.emplace("Host", getAddress());
-    request.headers.emplace("x-amz-date",
-        testEnviornment ? fakeAMZTimestamp : buildAMZTimestamp());
+    request.headers.emplace("Content-Length", "0");
 
     GCPSigner::StringToSign stringToSign = {
         .region = _settings.region,
@@ -142,40 +181,38 @@ unique_ptr<utils::DataVector<uint8_t>> GCP::deleteRequestGeneric(
         .signedHeaders = "host"
     };
 
-    string authHeader = GCPSigner::createSignedRequest(
+    try {
+    request.path = GCPSigner::createSignedRequest(
         _secret->serviceAccountEmail,
         _secret->privateKey,
         request,
         stringToSign);
-
-    string httpHeader = network::HttpRequest::getRequestMethod(request.method);
-    httpHeader += " " + request.path + " ";
-    httpHeader += string(network::HttpRequest::getRequestType(request.type)) + "\r\n";
-
-    for (const auto& h : request.headers) {
-        httpHeader += h.first + ": " + h.second + "\r\n";
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] GCP sign failed: " << e.what() << std::endl;
+        return nullptr;
     }
-    httpHeader += "Authorization: " + authHeader + "\r\n";
-    httpHeader += "\r\n";
 
-    auto data = make_unique<utils::DataVector<uint8_t>>(httpHeader.size());
-    memcpy(static_cast<void*>(data->data()), httpHeader.data(), httpHeader.size());
-    return data;
+    return serializeRequest(request);
 }
 
 unique_ptr<utils::DataVector<uint8_t>> GCP::createMultiPartRequest(
     const string& filePath) const
 {
+    if (!_secret) {
+        return nullptr;
+    }
     network::HttpRequest request;
     request.method = network::HttpRequest::Method::POST;
     request.type = network::HttpRequest::Type::HTTP_1_1;
 
-    request.path = "/" + _settings.bucket + "/" + filePath;
+    request.path = "/" + filePath;
     request.queries.emplace("uploads", "");
 
+    auto date = testEnvironment ? fakeAMZTimestamp : buildAMZTimestamp();
+    request.queries.emplace("X-Goog-Date", date);
     request.headers.emplace("Host", getAddress());
-    request.headers.emplace("x-amz-date",
-        testEnviornment ? fakeAMZTimestamp : buildAMZTimestamp());
+    request.headers.emplace("Date", date);
+    request.headers.emplace("Content-Length", "0");
 
     GCPSigner::StringToSign stringToSign = {
         .region = _settings.region,
@@ -183,25 +220,18 @@ unique_ptr<utils::DataVector<uint8_t>> GCP::createMultiPartRequest(
         .signedHeaders = "host"
     };
 
-    string authHeader = GCPSigner::createSignedRequest(
+    try {
+    request.path = GCPSigner::createSignedRequest(
         _secret->serviceAccountEmail,
         _secret->privateKey,
         request,
         stringToSign);
-
-    string httpHeader = network::HttpRequest::getRequestMethod(request.method);
-    httpHeader += " " + request.path + " ";
-    httpHeader += string(network::HttpRequest::getRequestType(request.type)) + "\r\n";
-
-    for (const auto& h : request.headers) {
-        httpHeader += h.first + ": " + h.second + "\r\n";
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] GCP sign failed: " << e.what() << std::endl;
+        return nullptr;
     }
-    httpHeader += "Authorization: " + authHeader + "\r\n";
-    httpHeader += "\r\n";
 
-    auto data = make_unique<utils::DataVector<uint8_t>>(httpHeader.size());
-    memcpy(static_cast<void*>(data->data()), httpHeader.data(), httpHeader.size());
-    return data;
+    return serializeRequest(request);
 }
 
 unique_ptr<utils::DataVector<uint8_t>> GCP::completeMultiPartRequest(
@@ -210,6 +240,9 @@ unique_ptr<utils::DataVector<uint8_t>> GCP::completeMultiPartRequest(
     const vector<string>& etags,
     string& content) const
 {
+    if (!_secret) {
+        return nullptr;
+    }
     content = "<CompleteMultipartUpload>\n";
     for (size_t i = 0; i < etags.size(); i++) {
         content += "<Part>\n<PartNumber>";
@@ -224,12 +257,13 @@ unique_ptr<utils::DataVector<uint8_t>> GCP::completeMultiPartRequest(
     request.method = network::HttpRequest::Method::POST;
     request.type = network::HttpRequest::Type::HTTP_1_1;
 
-    request.path = "/" + _settings.bucket + "/" + filePath;
+    request.path = "/" + filePath;
     request.queries.emplace("uploadId", uploadId);
 
+    auto date = testEnvironment ? fakeAMZTimestamp : buildAMZTimestamp();
+    request.queries.emplace("X-Goog-Date", date);
     request.headers.emplace("Host", getAddress());
-    request.headers.emplace("x-amz-date",
-        testEnviornment ? fakeAMZTimestamp : buildAMZTimestamp());
+    request.headers.emplace("Date", date);
     request.headers.emplace("Content-Length", to_string(content.size()));
 
     GCPSigner::StringToSign stringToSign = {
@@ -238,32 +272,23 @@ unique_ptr<utils::DataVector<uint8_t>> GCP::completeMultiPartRequest(
         .signedHeaders = "host"
     };
 
-    string authHeader = GCPSigner::createSignedRequest(
+    try {
+    request.path = GCPSigner::createSignedRequest(
         _secret->serviceAccountEmail,
         _secret->privateKey,
         request,
         stringToSign);
-
-    string httpHeader = network::HttpRequest::getRequestMethod(request.method);
-    httpHeader += " " + request.path + " ";
-    httpHeader += string(network::HttpRequest::getRequestType(request.type)) + "\r\n";
-
-    for (const auto& h : request.headers) {
-        httpHeader += h.first + ": " + h.second + "\r\n";
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] GCP sign failed: " << e.what() << std::endl;
+        return nullptr;
     }
-    httpHeader += "Authorization: " + authHeader + "\r\n";
-    httpHeader += "\r\n";
 
-    auto totalSize = httpHeader.size() + content.size();
-    auto data = make_unique<utils::DataVector<uint8_t>>(totalSize);
-    memcpy(static_cast<void*>(data->data()), httpHeader.data(), httpHeader.size());
-    memcpy(static_cast<void*>(data->data() + httpHeader.size()), content.data(), content.size());
-    return data;
+    return serializeRequestWithBody(request, content);
 }
 
 string GCP::getAddress() const
 {
-    return "storage.googleapis.com";
+    return _settings.bucket + ".storage.googleapis.com";
 }
 
 uint16_t GCP::getPort() const
@@ -283,6 +308,11 @@ string GCP::getInstanceRegion(network::TaskedSendReceiverHandle& sendReceiver)
 }
 
 void GCP::initSecret(myblob::network::TaskedSendReceiverHandle& sendReceiverHandle) {
+    if (!_secret) {
+        _secret = std::make_unique<Secret>();
+        _secret->serviceAccountEmail = _settings.bucket;
+        _secret->privateKey.clear();
+    }
 }
 
 void GCP::getSecret() {
@@ -301,7 +331,7 @@ unique_ptr<utils::DataVector<uint8_t>> GCP::resignRequest(
 unique_ptr<utils::DataVector<uint8_t>> GCP::downloadInstanceInfo(
     const string& info) const
 {
-    return nullptr;
+    return buildGCPInstanceRequest(info);
 }
 
 }

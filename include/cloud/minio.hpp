@@ -10,7 +10,7 @@ namespace cloud {
 class MinIO:public AWS{
 public:
   explicit MinIO(const RemoteInfo&info,myblob::network::ConnectionManager&conn_mgr,myblob::network::HttpClient&http_client):AWS(info,conn_mgr,http_client){
-    assert(info.provider == CloudService::MinIO);
+    assert(info.provider == CloudService::MinIO);//我断言这必定为真，否则别跑了
   }
   MinIO(const RemoteInfo& info, 
           const std::string& keyId, 

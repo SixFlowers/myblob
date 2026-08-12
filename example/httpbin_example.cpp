@@ -2,6 +2,7 @@
 #include "cloud/transaction.hpp"
 #include "network/message_result.hpp"
 #include <iostream>
+#include <cstdlib>
 
 void printResult(const myblob::network::MessageResult& result, const std::string& path) {
     std::cout << "=== " << path << " ===" << std::endl;
@@ -27,7 +28,9 @@ int main() {
     std::cout << "测试地址: httpbin.org" << std::endl;
     std::cout << std::endl;
 
-    auto provider = myblob::cloud::Provider::makeProvider("http://httpbin.org");
+    const char* env = getenv("MYBLOB_ENDPOINT");
+    std::string endpoint = env ? env : "http://httpbin.org";
+    auto provider = myblob::cloud::Provider::makeProvider(endpoint);
     if (!provider) {
         std::cerr << "创建 Provider 失败" << std::endl;
         return 1;

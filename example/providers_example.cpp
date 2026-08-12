@@ -29,7 +29,7 @@ int main() {
         "azure://my-container/path/to/file.txt",
         true,
         "myaccount",
-        "base64encodedkey...",
+        "dGVzdC1rZXk=",  // base64("test-key")
         nullptr
     );
     
@@ -43,13 +43,17 @@ int main() {
         "gs://my-bucket/path/to/file.txt",
         true,
         "service@project.iam.gserviceaccount.com",
-        "base64encodedkey...",
+        "dGVzdC1rZXk=",  // base64("test-key")
         nullptr
     );
     
     if (gcpProvider) {
         auto request = gcpProvider->getRequest("path/to/file.txt", {0, 0});
-        std::cout << "GCP request size: " << request->size() << " bytes\n";
+        if (request) {
+            std::cout << "GCP request size: " << request->size() << " bytes\n";
+        } else {
+            std::cout << "GCP: sign failed (expected without valid PEM key)\n";
+        }
     }
     
     // ========== MinIO ==========

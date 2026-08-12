@@ -24,8 +24,8 @@ namespace myblob::network {
           HTTP_1_1
       };
       
-      std::map<std::string, std::string> queries;
-      std::map<std::string, std::string> headers;
+      std::map<std::string, std::string> queries;//查询参数(多部分上传分片)
+      std::map<std::string, std::string> headers;//请求头
       Method method = Method::GET;
       Type type = Type::HTTP_1_1;
       std::string path;

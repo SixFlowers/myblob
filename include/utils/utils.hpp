@@ -17,6 +17,9 @@ namespace myblob::utils {
   //HMAC签名(AWS 签名核心)
   std::pair<std::unique_ptr<uint8_t[]>,uint64_t> hmacSign(const uint8_t*keyData,uint64_t keyLength,
   const uint8_t* msgData,uint64_t msgLength);
+  //RSA-SHA256签名(GCP signed URL)
+  std::pair<std::unique_ptr<uint8_t[]>,uint64_t> rsaSign(const uint8_t*privateKeyPem,uint64_t privateKeyLength,
+  const uint8_t* msgData,uint64_t msgLength);
   //十六进制编码
   std::string hexEncode(const uint8_t*input,uint64_t length,bool upper = false);
 

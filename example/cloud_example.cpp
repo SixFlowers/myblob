@@ -55,7 +55,7 @@ int main() {
         "AKIAIOSFODNN7EXAMPLE",
         "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
         "myazureaccount",
-        "base64encodedazurekey"
+        "dGVzdC1rZXk="  // base64("test-key")
     );
     
     return success ? 0 : 1;

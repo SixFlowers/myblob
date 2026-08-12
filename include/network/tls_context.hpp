@@ -12,7 +12,7 @@ namespace myblob::network {
     //缓存掩码
     static constexpr uint64_t cacheMask = (~0ull) >> (64 - cachePower);
     //数组大小
-    static constexpr uint64_t cacheSize = 1ull >> cachePower;
+    static constexpr uint64_t cacheSize = 1ull << cachePower;
     TLSContext();
     ~TLSContext();
     bool cacheSession(int fd,SSL* ssl);

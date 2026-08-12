@@ -3,6 +3,7 @@
 #include <openssl/crypto.h>     // OpenSSL 加密函数
 #include <openssl/ssl.h>        // SSL, SSL_SESSION
 #include <sys/socket.h>         // socket 系统调用
+#include <utility>
 #include <cstring>              // memset
 
 namespace myblob::network {
@@ -14,7 +15,7 @@ TLSContext::TLSContext() : _sessionCache(){
 }
 TLSContext::~TLSContext(){
   for(uint64_t i = 0ull;i < cacheSize;i++){
-    if(_sessionCche[i].first && _sessionCache[i].second){
+    if(_sessionCache[i].first && _sessionCache[i].second){
       SSL_SESSION_free(_sessionCache[i].second);
     }
   }
@@ -23,7 +24,7 @@ TLSContext::~TLSContext(){
   }
 }
 void TLSContext::initOpenSSL() {//static方法只调用一次;只会初始化一次
-  OPENSSL_add_ssl_algorithms();
+  OpenSSL_add_ssl_algorithms();
   SSL_load_error_strings();
 
 }
@@ -37,9 +38,9 @@ bool TLSContext::cacheSession(int fd, SSL* ssl) {
   if(!getpeername(fd,reinterpret_cast<struct sockaddr*>(&addr),&addrlen)){
     uint64_t index = addr.sin_addr.s_addr & cacheMask;
     if(_sessionCache[index].first){
-      SSL_SESION_free(_sessionCache[index].second);
+      SSL_SESSION_free(_sessionCache[index].second);
     }
-    _sessionCache[index] = std::make_pair(addr.sin_addr.s_addr,SSL_get1_session(ssl));
+    _sessionCache[index] = std::make_pair(static_cast<uint64_t>(addr.sin_addr.s_addr),SSL_get1_session(ssl));
     return true;
   }
   return false;

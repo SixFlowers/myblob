@@ -110,7 +110,7 @@ public:
     
     constexpr void push_back(const T& value) {
         if (_size >= _capacity) {
-            resize(_capacity == 0 ? 1 : _capacity * 2);
+            reserve(_capacity == 0 ? 1 : _capacity * 2);
         }
         _data[_size++] = value;
     }
@@ -119,6 +119,9 @@ public:
     constexpr const T& operator[](uint64_t index) const { return _data[index]; }
     
     [[nodiscard]] constexpr std::unique_ptr<T[]> transferBuffer() {
+        _data = nullptr;
+        _capacity = 0;
+        _size = 0;
         return std::move(_dataOwned);
     }
 };

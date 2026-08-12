@@ -1,9 +1,12 @@
 #include "cloud/provider.hpp"
 #include "cloud/transaction.hpp"
 #include <iostream>
+#include <cstdlib>
 
 int main() {
-    auto provider = myblob::cloud::Provider::makeProvider("http://httpbin.org");
+    const char* env = getenv("MYBLOB_ENDPOINT");
+    std::string endpoint = env ? env : "http://httpbin.org";
+    auto provider = myblob::cloud::Provider::makeProvider(endpoint);
     if (!provider) return 1;
     
     myblob::cloud::Transaction transaction(provider.get());

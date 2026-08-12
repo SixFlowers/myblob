@@ -2,6 +2,7 @@
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/md5.h>
+#include <openssl/pem.h>
 #include <openssl/sha.h>
 #include <openssl/core_names.h>
 #include <openssl/params.h>
@@ -17,7 +18,7 @@ using namespace std;
 string encodeUrlParameters(const string& encode) {
   string result;
   for(auto c:encode){
-    if(isalnum(c) || c== '-' || c == '_' || c == '.' || c == '~'){
+    if(isalnum(static_cast<unsigned char>(c)) || c== '-' || c == '_' || c == '.' || c == '~'){
       result += c;
     }else{
       result += "%";
@@ -48,11 +49,12 @@ pair<unique_ptr<uint8_t[]>, uint64_t> base64Decode(const uint8_t* input, uint64_
     auto buffer = make_unique<uint8_t[]>(1);
     return {move(buffer),0};
   }
-  auto baseLength = 3*length / 4;
+  auto baseLength = 3 * ((length + 3) / 4);
   auto buffer = make_unique<uint8_t[]>(baseLength+1);
   auto decodeLength=EVP_DecodeBlock(reinterpret_cast<unsigned char*>(buffer.get()),input,static_cast<int>(length));
   if(decodeLength<0){
-    throw runtime_error("Base64 decode error!");
+    std::string preview(reinterpret_cast<const char*>(input), std::min(length, uint64_t(20)));
+    throw runtime_error("Base64 decode error! Input preview: " + preview);
   }
   while(length > 0 && input[length-1]=='='){
     --decodeLength;
@@ -146,6 +148,51 @@ pair<unique_ptr<uint8_t[]>, uint64_t> hmacSign(
     throw runtime_error("OpenSSL Error: MAC final failed");
   }
   return {move(hash),static_cast<uint64_t>(len)};
+}
+
+pair<unique_ptr<uint8_t[]>, uint64_t> rsaSign(
+    const uint8_t* privateKeyPem,
+    uint64_t privateKeyLength,
+    const uint8_t* msgData,
+    uint64_t msgLength)
+{
+  BIO* keyBio = BIO_new_mem_buf(privateKeyPem, static_cast<int>(privateKeyLength));
+  if (!keyBio) {
+    throw runtime_error("OpenSSL Error: Failed to create key BIO");
+  }
+
+  unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> pkey(
+      PEM_read_bio_PrivateKey(keyBio, nullptr, nullptr, nullptr),
+      EVP_PKEY_free);
+  BIO_free(keyBio);
+
+  if (!pkey) {
+    throw runtime_error("OpenSSL Error: Failed to read private key");
+  }
+
+  unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> mdctx(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+  if (!mdctx) {
+    throw runtime_error("OpenSSL Error: Failed to create digest context");
+  }
+
+  if (EVP_DigestSignInit(mdctx.get(), nullptr, EVP_sha256(), nullptr, pkey.get()) <= 0) {
+    throw runtime_error("OpenSSL Error: DigestSignInit failed");
+  }
+  if (EVP_DigestSignUpdate(mdctx.get(), msgData, msgLength) <= 0) {
+    throw runtime_error("OpenSSL Error: DigestSignUpdate failed");
+  }
+
+  size_t sigLen = 0;
+  if (EVP_DigestSignFinal(mdctx.get(), nullptr, &sigLen) <= 0) {
+    throw runtime_error("OpenSSL Error: DigestSignFinal size query failed");
+  }
+
+  auto signature = make_unique<uint8_t[]>(sigLen);
+  if (EVP_DigestSignFinal(mdctx.get(), signature.get(), &sigLen) <= 0) {
+    throw runtime_error("OpenSSL Error: DigestSignFinal failed");
+  }
+
+  return {move(signature), static_cast<uint64_t>(sigLen)};
 }
 
 }

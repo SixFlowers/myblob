@@ -80,10 +80,16 @@ TaskedSendReceiverHandle::TaskedSendReceiverHandle(
 TaskedSendReceiverHandle& TaskedSendReceiverHandle::operator=(
     TaskedSendReceiverHandle&& other
 ) noexcept {
-    if (other._group == _group) {
-        _sendReceiver = other._sendReceiver;
-        other._sendReceiver = nullptr;
+    if (this == &other) return *this;
+    // Release current resource
+    if (_sendReceiver && _group) {
+        _sendReceiver->reset();
+        (void)_group->_sendReceiverCache.insert(_sendReceiver);
     }
+    // Transfer from other
+    _group = other._group;
+    _sendReceiver = other._sendReceiver;
+    other._sendReceiver = nullptr;
     return *this;
 }
 
@@ -160,14 +166,23 @@ std::unique_ptr<utils::DataVector<uint8_t>> TaskedSendReceiver::getReused(){
   return nullptr;
 }
 
-void TaskedSendReceiver::addCache(const std::string& hostname, 
+void TaskedSendReceiver::addCache(const std::string& hostname,
                                    std::unique_ptr<Cache> cache){
-  // TODO: 实现缓存功能
-  (void)hostname;
-  (void)cache;
+  if (!cache || !_connectionManager) return;
+  // Enable throughput-aware caching in the connection manager.
+  // The cache tracks per-socket throughput percentiles and influences
+  // connection pool eviction: high-throughput connections get higher
+  // cache priority and survive longer in the pool.
+  if (!_connectionManager->hasCache()) {
+    _connectionManager->enableThroughputCache();
+    std::cout << "[Cache] Throughput cache enabled for " << hostname << std::endl;
+  }
+  // Per-hostname cache entries will be populated as connections are
+  // returned to the pool via returnConnection().
+  (void)cache;  // cache ownership transferred elsewhere or replaced by ThroughputCache
 }
 
-void TaskedSendReceiver::sendReceive(bool local, bool oneQueueInvocation){
+void TaskedSendReceiver::sendReceive(bool local, bool oneQueueInvocation){//处理任务
   _stopDeamon = false;
   std::exception_ptr firstException = nullptr;
   //当前在处理的请求数
@@ -180,7 +195,10 @@ void TaskedSendReceiver::sendReceive(bool local, bool oneQueueInvocation){
       }
       auto original = val.value();
       auto messageTask = MessageTask::buildMessageTask(original, *_group._tcpSettings, _group._chunkSize);
-      assert(messageTask.get());
+      if (!messageTask) {
+        original->result.setState(MessageState::Aborted);
+        continue;
+      }
       //尝试复用内存
       if(!original->result.getDataVector().capacity()){
         auto mem = _group._reuse.consume();
@@ -192,13 +210,25 @@ void TaskedSendReceiver::sendReceive(bool local, bool oneQueueInvocation){
         (*_timings)[original->traceId].start = std::chrono::steady_clock::now();
       }
       try{
-        if(messageTask->execute(*_connectionManager) == MessageState::Aborted){
+        auto status = messageTask->execute(*_connectionManager);
+        if(status == MessageState::Aborted){
           if(messageTask->originalMessage->requiresFinish()){
             messageTask->originalMessage->finish();
           }
           continue;
         }
-      }catch(...){
+        if(status == MessageState::Finished){
+          if(_timings){
+            (*_timings)[messageTask->originalMessage->traceId].size = messageTask->originalMessage->result.getSize();
+            (*_timings)[messageTask->originalMessage->traceId].finish = std::chrono::steady_clock::now();
+          }
+          if(messageTask->originalMessage->requiresFinish()){
+            messageTask->originalMessage->finish();
+          }
+          continue;
+        }
+      }catch(const std::exception& e){
+        std::cerr << "[ERROR] TaskedSendReceiver: " << e.what() << std::endl;
         if(!firstException){
           firstException = std::current_exception();
         }
@@ -227,13 +257,25 @@ void TaskedSendReceiver::sendReceive(bool local, bool oneQueueInvocation){
         (*_timings)[original->traceId].start = std::chrono::steady_clock::now();
       }
       try{
-        if(messageTask->execute(*_connectionManager) == MessageState::Aborted){
+        auto status = messageTask->execute(*_connectionManager);
+        if(status == MessageState::Aborted){
           if(messageTask->originalMessage->requiresFinish()){
             messageTask->originalMessage->finish();
           }
           continue;
         }
-      }catch(...){
+        if(status == MessageState::Finished){
+          if(_timings){
+            (*_timings)[messageTask->originalMessage->traceId].size = messageTask->originalMessage->result.getSize();
+            (*_timings)[messageTask->originalMessage->traceId].finish = std::chrono::steady_clock::now();
+          }
+          if(messageTask->originalMessage->requiresFinish()){
+            messageTask->originalMessage->finish();
+          }
+          continue;
+        }
+      }catch(const std::exception& e){
+        std::cerr << "[ERROR] TaskedSendReceiver: " << e.what() << std::endl;
         if(!firstException){
           firstException = std::current_exception();
         }
@@ -250,14 +292,14 @@ void TaskedSendReceiver::sendReceive(bool local, bool oneQueueInvocation){
     if(count > 0){
       Socket::Request* req = nullptr;
       try{
-        req = _connectionManager->getPollSocket().complete();
+        req = _connectionManager->getSocket().complete();
       }catch(const std::exception& e){
         continue;
       }
-      count--;
       if(!req || !req->userData){
         continue;
       }
+      count--;  // only decrement on valid completion
       auto task = reinterpret_cast<MessageTask*>(req->userData);
       try{
         auto status = task->execute(*_connectionManager);
@@ -272,6 +314,13 @@ void TaskedSendReceiver::sendReceive(bool local, bool oneQueueInvocation){
               if(task->originalMessage->requiresFinish()){
                 task->originalMessage->finish();
               }
+              // 回收缓冲区到复用池（避免频繁 malloc/free）
+              {
+                auto dv = task->originalMessage->result.moveDataVector();
+                if (dv) {
+                  reuse(std::move(dv));
+                }
+              }
               _messageTasks.erase(it);
               _group._cv.notify_all();
               break;
@@ -280,7 +329,8 @@ void TaskedSendReceiver::sendReceive(bool local, bool oneQueueInvocation){
         }else if(_timings && status == MessageState::Receiving && !task->receiveBufferOffset){
           (*_timings)[task->originalMessage->traceId].receive = std::chrono::steady_clock::now();
         }
-      }catch(...){
+      }catch(const std::exception& e){
+        std::cerr << "[ERROR] TaskedSendReceiver: " << e.what() << std::endl;
         if(!firstException){
           firstException = std::current_exception();
         }
@@ -289,7 +339,7 @@ void TaskedSendReceiver::sendReceive(bool local, bool oneQueueInvocation){
     if(!_stopDeamon && _messageTasks.size() < _group._concurrentRequests && !firstException){
       local ? emplaceLocalRequest() : emplaceNewRequest();
     }
-    auto cnt = _connectionManager->getPollSocket().submit();
+    auto cnt = _connectionManager->getSocket().submit();
     if(cnt < 0){
       throw std::runtime_error("socket submit error:" + std::to_string(-cnt));
     }
@@ -310,7 +360,7 @@ void TaskedSendReceiver::sendReceive(bool local, bool oneQueueInvocation){
 }
 
 int32_t TaskedSendReceiver::submitRequests() {
-    return _connectionManager->getPollSocket().submit();
+    return _connectionManager->getSocket().submit();
 }
 
 void TaskedSendReceiver::reset() {

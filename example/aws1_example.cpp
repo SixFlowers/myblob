@@ -1,16 +1,14 @@
 #include "cloud/provider.hpp"
 #include "cloud/transaction.hpp"
 #include <iostream>
+#include <cstdlib>
 
 int main() {
     using namespace myblob;
-    
-    // 使用 HTTP Provider 测试基本功能
-    // 实际项目中可以使用 s3:// 协议创建 AWS Provider
-    auto provider = cloud::Provider::makeProvider(
-        "http://httpbin.org",
-        false  // HTTP
-    );
+
+    const char* env = getenv("MYBLOB_ENDPOINT");
+    std::string endpoint = env ? env : "http://httpbin.org";
+    auto provider = cloud::Provider::makeProvider(endpoint, false);
     
     if (!provider) {
         std::cerr << "创建 Provider 失败" << std::endl;

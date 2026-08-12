@@ -28,6 +28,10 @@ bool multipartUpload(
     
     // 1. 初始化多部分上传
     auto initRequest = provider->createMultiPartRequest("large-file.bin");
+    if (!initRequest) {
+        std::cerr << "GCP: init multipart failed (expected without valid PEM key)\n";
+        return false;
+    }
     std::cout << "Init multipart upload request: " << initRequest->size() << " bytes\n";
     
     // 2. 上传各个分片（实际实现需要处理响应获取 uploadId 和 etags）

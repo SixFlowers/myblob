@@ -1,27 +1,28 @@
 #pragma once
 #include "network/http_message.hpp"
+#include <cstdint>
 
 namespace myblob::network {
 
 class TLSConnection;
 class ConnectionManager;
 
-/// 实现HTTPS消息往返
+/// HTTPS 消息任务：在 HTTP 基础上增加 TLS 加密层
+/// 状态机流程：Init → TLSHandshake → InitSending → Sending → InitReceiving → Receiving → TLSShutdown → Finished/Aborted
+///
+/// 与 HTTPMessage 的区别：
+/// 1. 多了 TLSHandshake 状态（SSL 握手）
+/// 2. 多了 TLSShutdown 状态（SSL 关闭）
+/// 3. 发送/接收不直接用 socket，而是通过 TLSConnection 加密/解密
 struct HTTPSMessage : public HTTPMessage {
-    /// TLS层
-    TLSConnection* tlsLayer;
-    /// 文件描述符
-    int32_t fd;
+    TLSConnection* tlsLayer;  //TLS 加密层（封装 OpenSSL SSL 对象）
+    int32_t fd;               //socket 文件描述符
 
-    /// 构造函数
     HTTPSMessage(OriginalMessage* sendingMessage, 
                  TCPSettings& tcpSettings, 
                  uint32_t chunksize);
-    /// 析构函数
-    ~HTTPSMessage() override = default;
-    /// 消息执行回调
+    ~HTTPSMessage() override;
     MessageState execute(ConnectionManager& connectionManager) override;
-    /// 重置以重新开始
     void reset(ConnectionManager& socket, bool aborted);
 };
 

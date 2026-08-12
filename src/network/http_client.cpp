@@ -1,9 +1,11 @@
 #include "network/http_client.hpp"
+#include "network/http_helper.hpp"
+#include "utils/defer.hpp"
 #include <arpa/inet.h>
+#include <cerrno>
 #include <cstring>
 #include <fcntl.h>
 #include <netdb.h>
-#include <openssl/ssl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <netinet/tcp.h>
@@ -65,24 +67,29 @@ uint16_t HttpClient::extractPort(const std::string& url) {
 }
 
 int HttpClient::createSocket(const std::string& host, uint16_t port) {
-    int sockfd = ::socket(AF_INET, SOCK_STREAM, 0);
+    // 使用 getaddrinfo 替代已废弃且非线程安全的 gethostbyname
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;      // 支持 IPv4 + IPv6
+    hints.ai_socktype = SOCK_STREAM;
+
+    std::string portStr = std::to_string(port);
+    struct addrinfo* result = nullptr;
+    int ret = getaddrinfo(host.c_str(), portStr.c_str(), &hints, &result);
+    if (ret != 0 || result == nullptr) {
+        std::cerr << "[ERROR] DNS resolution failed for " << host
+                  << ": " << gai_strerror(ret) << std::endl;
+        return -1;
+    }
+    // RAII cleanup
+    auto dnsGuard = myblob::utils::Defer([result]() { freeaddrinfo(result); });
+
+    int sockfd = ::socket(result->ai_family, result->ai_socktype, result->ai_protocol);
     if (sockfd < 0) {
         return -1;
     }
-    
-    struct hostent* server = gethostbyname(host.c_str());
-    if (server == nullptr) {
-        ::close(sockfd);
-        return -1;
-    }
-    
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    memcpy(&addr.sin_addr.s_addr, server->h_addr, server->h_length);
-    addr.sin_port = htons(port);
-    
-    if (::connect(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+
+    if (::connect(sockfd, result->ai_addr, result->ai_addrlen) < 0) {
         ::close(sockfd);
         return -1;
     }
@@ -108,85 +115,48 @@ HttpResponse HttpClient::doSendRequest(int sockfd, const HttpRequest& request) {
 }
 
 HttpResponse HttpClient::recvResponse(int sockfd) {
-    HttpResponse response;
+    // 使用共享的 HTTP 响应解析（与状态机版本一致）
     utils::DataVector<uint8_t> buffer(8192);
-    std::string header_buffer;
-    bool headers_complete = false;
-    size_t content_length = 0;
-    size_t body_received = 0;
-    
+    uint64_t totalRead = 0;
+
     while (true) {
-        ssize_t n = ::recv(sockfd, buffer.data() + header_buffer.size(),
-                          buffer.capacity() - header_buffer.size() - 1, 0);
-        if (n <= 0) {
+        // 确保有空间继续读
+        if (totalRead + 4096 > buffer.capacity()) {
+            if (!buffer.owned()) break;  // 借用模式不能扩容
+            buffer.reserve(buffer.capacity() * 2);
+        }
+        buffer.resize(totalRead + 4096);
+        ssize_t n = ::recv(sockfd, buffer.data() + totalRead,
+                          buffer.size() - totalRead, 0);
+        if (n <= 0) break;
+        totalRead += static_cast<uint64_t>(n);
+        buffer.resize(totalRead);
+
+        // 使用共享的 HttpHelper 判断响应是否收完
+        std::unique_ptr<HttpHelper::Info> info;
+        if (HttpHelper::finished(buffer.data(), totalRead, info)) {
+            if (info) return info->response;
             break;
         }
-        
-        header_buffer.append((const char*)buffer.data() + header_buffer.size(), n);
-        
-        if (!headers_complete) {
-            size_t header_end = header_buffer.find("\r\n\r\n");
-            if (header_end != std::string::npos) {
-                std::string headers = header_buffer.substr(0, header_end);
-                size_t status_pos = headers.find("HTTP/");
-                if (status_pos != std::string::npos) {
-                    size_t status_end = headers.find("\r\n", status_pos);
-                    std::string status_line = headers.substr(status_pos, status_end - status_pos);
-                    
-                    if (status_line.find("HTTP/1.0") == status_pos) {
-                        response.type = HttpResponse::Type::HTTP_1_0;
-                    } else {
-                        response.type = HttpResponse::Type::HTTP_1_1;
-                    }
-                    
-                    size_t code_pos = status_line.find(" ");
-                    if (code_pos != std::string::npos) {
-                        int code = std::stoi(status_line.substr(code_pos + 1, 3));
-                        switch (code) {
-                            case 200: response.code = HttpResponse::Code::OK_200; break;
-                            case 201: response.code = HttpResponse::Code::CREATED_201; break;
-                            case 204: response.code = HttpResponse::Code::NO_CONTENT_204; break;
-                            case 206: response.code = HttpResponse::Code::PARTIAL_CONTENT_206; break;
-                            case 400: response.code = HttpResponse::Code::BAD_REQUEST_400; break;
-                            case 401: response.code = HttpResponse::Code::UNAUTHORIZED_401; break;
-                            case 403: response.code = HttpResponse::Code::FORBIDDEN_403; break;
-                            case 404: response.code = HttpResponse::Code::NOT_FOUND_404; break;
-                            case 500: response.code = HttpResponse::Code::INTERNAL_SERVER_ERROR_500; break;
-                            default: response.code = HttpResponse::Code::UNKNOWN; break;
-                        }
-                    }
-                }
-                
-                size_t cl_pos = headers.find("Content-Length:");
-                if (cl_pos != std::string::npos) {
-                    size_t cl_end = headers.find("\r\n", cl_pos);
-                    if (cl_end != std::string::npos) {
-                        std::string cl_str = headers.substr(cl_pos + 15, cl_end - cl_pos - 15);
-                        content_length = stoul(cl_str);
-                    }
-                }
-                
-                std::string remaining = header_buffer.substr(header_end + 4);
-                header_buffer.clear();
-                headers_complete = true;
-                body_received = remaining.size();
-                if (content_length > 0 && body_received >= content_length) {
-                    break;
-                }
-            }
-        } else {
-            body_received += n;
-            header_buffer.clear();
-            if (content_length > 0 && body_received >= content_length) {
-                break;
-            }
+    }
+
+    // 收完或出错后，尝试解析已收到的数据
+    if (totalRead > 0) {
+        try {
+            std::string_view sv(reinterpret_cast<const char*>(buffer.data()), totalRead);
+            return HttpResponse::deserialize(sv);
+        } catch (const std::exception& e) {
+            std::cerr << "[WARN] http_client: response parse failed: " << e.what() << std::endl;
+        } catch (...) {
+            std::cerr << "[WARN] http_client: response parse failed (unknown error)" << std::endl;
         }
     }
-    
-    return response;
+    HttpResponse resp;
+    resp.code = HttpResponse::Code::INTERNAL_SERVER_ERROR_500;
+    return resp;
 }
 
-HttpResponse HttpClient::sendRequest(std::shared_ptr<Connection> conn,
+HttpResponse HttpClient::sendRequest(std::unique_ptr<Connection>& conn,
                                    const std::string& method,
                                    const std::string& path,
                                    uint64_t offset,
@@ -201,12 +171,12 @@ HttpResponse HttpClient::sendRequest(std::shared_ptr<Connection> conn,
     }
     
     int sockfd = conn->getSocket();
-    bool use_tls = conn->usesTLS();
-    
+
+    // 构建 HTTP 请求字符串
     std::string request_str = method + " " + path + " HTTP/1.1\r\n";
     request_str += "Host: " + conn->getHost() + "\r\n";
     request_str += "Connection: close\r\n";
-    
+
     if (offset > 0 || length > 0) {
         std::string range = "bytes=" + std::to_string(offset) + "-";
         if (length > 0) {
@@ -214,18 +184,12 @@ HttpResponse HttpClient::sendRequest(std::shared_ptr<Connection> conn,
         }
         request_str += "Range: " + range + "\r\n";
     }
-    
+
     request_str += "\r\n";
-    
-    if (use_tls) {
-        SSL* ssl = conn->getSSL();
-        if (ssl) {
-            SSL_write(ssl, request_str.c_str(), request_str.size());
-        }
-    } else {
-        ::send(sockfd, request_str.c_str(), request_str.size(), 0);
-    }
-    
+
+    // 纯 TCP send/recv：TLS 加解密由 HTTPSMessage/TLSConnection 层负责
+    ::send(sockfd, request_str.c_str(), request_str.size(), 0);
+
     return recvResponse(sockfd);
 }
 

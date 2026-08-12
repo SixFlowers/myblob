@@ -11,12 +11,12 @@ namespace myblob::network {
 class IOUringSocket : public Socket{
 private:
 #ifdef MYBLOB_HAS_IO_URING
-  struct io_uring _uring;
-  int _eventId = -1;
+  struct io_uring _uring;// io_uring 实例（包含 SQ 和 CQ）
+  int _eventId = -1;// 事件 fd（用于 epoll 集成）
 #endif
-  std::vector<Request*> _completions;
+  std::vector<Request*> _completions;// 完成队列（submitCompleteAll 用）
 public:
-  explicit IOUringSocket(uint32_t entries = 1024,int32_t flags = 0);
+  explicit IOUringSocket(uint32_t entries = 1024,int32_t flags = 0);//  entries = 1024: 最多同时 1024 个未完成请求
   ~IOUringSocket() noexcept override;
 #ifdef MYBLOB_HAS_IO_URING
     // ====================================================================

@@ -1,213 +1,247 @@
 #include "cloud/transaction.hpp"
 #include <iostream>
-#include <thread>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <cstring>
 
-namespace myblob::cloud {
+namespace myblob::cloud
+{
 
-Transaction::Transaction()
-    : provider_(nullptr) {
-}
-
-Transaction::Transaction(Provider* provider)
-    : provider_(provider) {
-}
-
-void Transaction::setProvider(Provider* provider) {
-    provider_ = provider;
-}
-
-bool Transaction::getObjectRequest(
-    const std::string& remotePath,
-    std::pair<uint64_t, uint64_t> range,
-    uint8_t* result,
-    uint64_t capacity,
-    uint64_t traceId
-) {
-    if (!provider_) {
-        return false;
+    Transaction::Transaction()
+        : provider_(nullptr)
+    {
     }
-    
-    auto msg = std::make_unique<network::OriginalMessage>(
-        provider_->getRequest(remotePath, range),
-        *provider_,
-        result,
-        capacity
-    );
-    
-    messages_.push_back(std::move(msg));
-    return true;
-}
 
-bool Transaction::putObjectRequest(
-    const std::string& remotePath,
-    const char* data,
-    uint64_t size,
-    uint8_t* result,
-    uint64_t capacity,
-    uint64_t traceId
-) {
-    if (!provider_) {
-        return false;
+    Transaction::Transaction(Provider *provider)
+        : provider_(provider)
+    {
     }
-    
-    auto msg = std::make_unique<network::OriginalMessage>(
-        provider_->putRequest(remotePath, std::string_view(data, size)),
-        *provider_,
-        result,
-        capacity
-    );
-    
-    messages_.push_back(std::move(msg));
-    return true;
-}
 
-bool Transaction::deleteObjectRequest(
-    const std::string& remotePath,
-    uint8_t* result,
-    uint64_t capacity,
-    uint64_t traceId
-) {
-    if (!provider_) {
-        return false;
+    void Transaction::setProvider(Provider *provider)
+    {
+        provider_ = provider;
     }
-    
-    auto msg = std::make_unique<network::OriginalMessage>(
-        provider_->deleteRequest(remotePath),
-        *provider_,
-        result,
-        capacity
-    );
-    
-    messages_.push_back(std::move(msg));
-    return true;
-}
 
-void Transaction::processSync(network::TaskedSendReceiverHandle& sendReceiverHandle) {
-    // 使用新的消息任务系统处理
-    for (auto& msg : messages_) {
-        if (msg->result.getState() == network::MessageState::Init) {
-            sendReceiverHandle.sendSync(msg.get());
+    void Transaction::execute()
+    {
+        network::TaskedSendReceiverGroup group;
+        auto handle = group.getHandle();
+        if (provider_)
+        {
+            provider_->initCache(handle); // 初始化缓存(预留接口)
+            verifyKeyRequest(handle, [this, &handle]()
+                             {
+            processSync(handle);
+            return true; });
+            return;
         }
+        processSync(handle);
     }
-    sendReceiverHandle.processSync();
-}
 
-bool Transaction::processAsync(network::TaskedSendReceiverGroup& group) {
-    // 异步处理所有消息
-    for (auto& msg : messages_) {
-        if (!group.send(msg.get())) {
+    bool Transaction::getObjectRequest(
+        const std::string &remotePath, // 文件路径
+        std::pair<uint64_t, uint64_t> range,
+        uint8_t *result,
+        uint64_t capacity,
+        uint64_t /*traceId*/
+    )
+    {
+        if (!provider_)
+        {
             return false;
         }
-    }
-    return true;
-}
-
-void Transaction::execute(){
-    requestHolder_.clear();
-    
-    if(!connMgr_){
-        connMgr_ = std::make_unique<network::ConnectionManager>();
-    }
-    auto& pollSocket = connMgr_->getPollSocket();
-    for(auto&msg:messages_){
-        if(msg->result.getState() == network::MessageState::Init){
-            auto conn = connMgr_->getConnection(
-                msg->provider.getAddress(),
-                msg->provider.getPort(),
-                msg->provider.isHTTPS()
-            );
-            if(conn && conn->isConnected()){
-                int fd = conn->getSocket();
-                msg->result.setState(network::MessageState::Sending);
-                auto req = std::make_unique<network::Socket::Request>();
-                req->fd = fd;
-                req->event = network::Socket::EventType::write;
-                req->userData = msg.get();
-                requestHolder_.push_back(std::move(req));
-                pollSocket.send(*requestHolder_.back());
-            }else{
-                msg->result.setState(network::MessageState::Aborted);
-            }
+        auto request = provider_->getRequest(remotePath, range);
+        if (!request)
+        {
+            return false;
         }
+
+        auto msg = std::make_unique<network::OriginalMessage>(
+            std::move(request),
+            *provider_,
+            result,
+            capacity);
+
+        messages_.push_back(std::move(msg));
+        return true;
     }
-    bool allDone = false;
-    while(!allDone){
-        int32_t completed = pollSocket.submit();
-        while(auto*req = pollSocket.complete()){
-            auto*msg = static_cast<network::OriginalMessage*>(req->userData);
-            if(msg->result.getState() == network::MessageState::Sending){
-                ssize_t sent = ::send(req->fd,msg->message->data(),msg->message->size(),0);
-                if(sent > 0){
-                    msg->result.setState(network::MessageState::Receiving);
-                    auto recvReq = std::make_unique<network::Socket::Request>();
-                    recvReq->fd = req->fd;
-                    recvReq->event = network::Socket::EventType::read;
-                    recvReq->userData = msg;
-                    recvReq->length = 0;
-                    recvReq->data.recvData = nullptr;
-                    requestHolder_.push_back(std::move(recvReq));
-                    pollSocket.recv(*requestHolder_.back());
-                }
-            }else if(msg->result.getState() == network::MessageState::Receiving){
-                uint8_t buffer[8192];
-                ssize_t received = ::recv(req->fd,buffer,sizeof(buffer),0);
-                if(received > 0){
-                    auto* dataVector = new utils::DataVector<uint8_t>();
-                    dataVector->resize(received);
-                    memcpy(dataVector->data(),buffer,received);
-                    msg->setResultVector(dataVector);
-                    msg->result.setState(network::MessageState::Finished);
-                    if(msg->requiresFinish()){
-                        msg->finish();
+
+    bool Transaction::putObjectRequest(
+        const std::string &remotePath,
+        const char *data,
+        uint64_t size,
+        uint8_t *result,
+        uint64_t capacity,
+        uint64_t /*traceId*/
+    )
+    {
+        if (!provider_)
+        {
+            return false;
+        }
+
+        // 检查是否需要多部分上传
+        if (provider_->multipartUploadSize() > 0 && size > provider_->multipartUploadSize())
+        {
+            // 多部分上传需要回调版本，这里简单返回false
+            // 实际使用应调用带回调的模板版本
+            return false;
+        }
+
+        auto request = provider_->putRequest(remotePath, std::string_view(data, size));
+        if (!request)
+        {
+            return false;
+        }
+
+        auto msg = std::make_unique<network::OriginalMessage>(
+            std::move(request),
+            *provider_,
+            result,
+            capacity);
+        msg->setPutRequestData(reinterpret_cast<const uint8_t *>(data), size);
+
+        messages_.push_back(std::move(msg));
+        return true;
+    }
+
+    bool Transaction::deleteObjectRequest(
+        const std::string &remotePath,
+        uint8_t *result,
+        uint64_t capacity,
+        uint64_t /*traceId*/
+    )
+    {
+        if (!provider_)
+        {
+            return false;
+        }
+        auto request = provider_->deleteRequest(remotePath);
+        if (!request)
+        {
+            return false;
+        }
+
+        auto msg = std::make_unique<network::OriginalMessage>(
+            std::move(request),
+            *provider_,
+            result,
+            capacity);
+
+        messages_.push_back(std::move(msg));
+        return true;
+    }
+    // handle:专属调度器
+    void Transaction::processSync(network::TaskedSendReceiverHandle &sendReceiverHandle)
+    {
+        do
+        {
+            // messageCounter_是一个原子计数器，记录已经发送的消息数量
+            for (; messageCounter_ < messages_.size(); messageCounter_++)
+            {
+                sendReceiverHandle.sendSync(messages_[messageCounter_].get());
+            }
+
+            // multipartUploads_是一个存储多部分上传信息的容器,multipart是一个多部分上传的实例(一个完整文件的分片上传任务)
+            for (auto &multipart : multipartUploads_)
+            {
+                if (multipart.state == MultipartUpload::State::Sending)
+                {
+                    for (auto i = 0ull; i < multipart.eTags.size(); i++)
+                    {
+                        sendReceiverHandle.sendSync(multipart.messages[i].get());
                     }
-                }else if(received == 0){
-                    msg->result.setState(network::MessageState::Finished);
-                    if(msg->requiresFinish()){
-                        msg->finish();
-                    }
+                    multipart.state = MultipartUpload::State::Processing;
+                    // MultipartUpload::State::Validating 分片全传完，Complete消息已就绪
+                }
+                else if (multipart.state == MultipartUpload::State::Validating)
+                {
+                    sendReceiverHandle.sendSync(multipart.messages[multipart.eTags.size()].get()); // 发送"完全上传"请求,complete请求
+                    multipart.state = MultipartUpload::State::Default;                             //// 重置，防止下一轮重复
+                }
+            }
+
+            sendReceiverHandle.processSync(); // ③ 驱动事件循环，等所有 IO 完成
+        } while (multipartUploads_.size() != completedMultiparts_);
+        // multipartUploads_.size()是客户端自己计算的
+    }
+    // group共享调度器
+    bool Transaction::processAsync(network::TaskedSendReceiverGroup &group)
+    {
+        std::vector<network::OriginalMessage *> submissions;
+        auto multiPartSize = 0ull;
+        for (auto &multipart : multipartUploads_)
+        {
+            multiPartSize += multipart.messages.size();
+        }
+        submissions.reserve(messages_.size() + multiPartSize);
+
+        auto previousCounter = messageCounter_.load();
+        for (; messageCounter_ < messages_.size(); messageCounter_++)
+        {
+            submissions.emplace_back(messages_[messageCounter_].get());
+        }
+
+        for (auto &multipart : multipartUploads_)
+        {
+            if (multipart.state == MultipartUpload::State::Sending)
+            {
+                for (auto i = 0ull; i < multipart.eTags.size(); i++)
+                {
+                    submissions.emplace_back(multipart.messages[i].get());
+                }
+                multipart.state = MultipartUpload::State::Processing;
+            }
+            else if (multipart.state == MultipartUpload::State::Validating)
+            {
+                submissions.emplace_back(multipart.messages[multipart.eTags.size()].get());
+                multipart.state = MultipartUpload::State::Default;
+            }
+        }
+
+        if (submissions.empty())
+        {
+            return true;
+        }
+
+        auto success = group.send(submissions);
+        if (!success)
+        {
+            messageCounter_ = previousCounter;
+            for (auto &multipart : multipartUploads_)
+            {
+                if (multipart.state == MultipartUpload::State::Processing)
+                {
+                    multipart.state = MultipartUpload::State::Sending;
+                }
+                else if (multipart.state == MultipartUpload::State::Default)
+                {
+                    multipart.state = MultipartUpload::State::Validating;
                 }
             }
         }
-        allDone = true;
-        for(auto&msg :messages_){
-            auto state = msg->result.getState();
-            if (state != network::MessageState::Finished &&
-                state != network::MessageState::Aborted &&
-                state != network::MessageState::Cancelled) {
-                allDone = false;
-                break;
-            }
-        }
-        if(completed == 0 && !allDone){
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+        return success;
     }
-}
 
-void Transaction::executeAsync() {
-    std::thread([this]() {
-        execute();
-    }).detach();
-}
+    // 迭代器实现
+    Transaction::Iterator Transaction::begin()
+    {
+        return Iterator(messages_.begin());
+    }
 
-// 迭代器实现
-Transaction::Iterator Transaction::begin() {
-    return Iterator(messages_.begin());
-}
+    Transaction::Iterator Transaction::end()
+    {
+        return Iterator(messages_.end());
+    }
 
-Transaction::Iterator Transaction::end() {
-    return Iterator(messages_.end());
-}
+    Transaction::ConstIterator Transaction::cbegin() const
+    {
+        return ConstIterator(messages_.cbegin());
+    }
 
-Transaction::ConstIterator Transaction::cbegin() const {
-    return ConstIterator(messages_.cbegin());
-}
+    Transaction::ConstIterator Transaction::cend() const
+    {
+        return ConstIterator(messages_.cend());
+    }
 
-Transaction::ConstIterator Transaction::cend() const {
-    return ConstIterator(messages_.cend());
-}
-
-}  // namespace myblob::cloud
+} // namespace myblob::cloud

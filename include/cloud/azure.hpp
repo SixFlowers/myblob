@@ -39,7 +39,7 @@ public:
   myblob::network::HttpClient&http_client):Provider(info.endpoint,info.port,conn_mgr,http_client,info.provider),
   _settings({info.bucket,info.port}){
     assert(info.provider == CloudService::Azure);
-    _type = info.provider;
+    type_ = info.provider;
   }
   //显示密钥
   Azure(const RemoteInfo&info,const std::string&accountName,const

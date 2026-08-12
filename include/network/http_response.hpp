@@ -9,39 +9,48 @@
 #include <string>
 #include <thread>
 namespace myblob::network {
-  struct HttpResponse {
+
+//HTTP 响应结构体：解析服务器返回的 HTTP 响应
+//由 HttpHelper::detect() 解析响应头后填充
+//被 HTTPMessage::execute() 用来判断请求是否成功
+struct HttpResponse {
+      //HTTP 状态码枚举（只列出 S3/Azure/GCP 常见的）
       enum class Code : uint8_t {
-        OK_200,
-        CREATED_201,
-        NO_CONTENT_204,
-        PARTIAL_CONTENT_206,
-        BAD_REQUEST_400,
-        UNAUTHORIZED_401,
-        FORBIDDEN_403,
-        NOT_FOUND_404,
-        CONFLICT_409,
-        LENGTH_REQUIRED_411,
-        RANGE_NOT_SATISFIABLE_416,
-        TOO_MANY_REQUESTS_429,
-        INTERNAL_SERVER_ERROR_500,
-        SERVICE_UNAVAILABLE_503,
-        SLOW_DOWN_503,
-        UNKNOWN = 255
+        OK_200,                    //GET/DELETE 成功
+        CREATED_201,               //PUT 创建成功
+        NO_CONTENT_204,            //DELETE 成功（无响应体）
+        PARTIAL_CONTENT_206,       //Range GET 成功（部分内容）
+        BAD_REQUEST_400,           //请求格式错误
+        UNAUTHORIZED_401,          //签名错误/过期
+        FORBIDDEN_403,             //权限不足
+        NOT_FOUND_404,             //对象/桶不存在
+        CONFLICT_409,              //桶已存在等冲突
+        LENGTH_REQUIRED_411,       //缺少 Content-Length
+        RANGE_NOT_SATISFIABLE_416, //Range 超出文件大小
+        TOO_MANY_REQUESTS_429,     //请求限流
+        INTERNAL_SERVER_ERROR_500, //服务器内部错误
+        SERVICE_UNAVAILABLE_503,   //服务不可用
+        SLOW_DOWN_503,             //S3 限速（降低发送速率）
+        UNKNOWN = 255              //未知状态码
       };
       
+      //HTTP 协议版本
       enum class Type : uint8_t {
           HTTP_1_0,
           HTTP_1_1
       };
       
-      std::map<std::string, std::string> headers;
-      Code code = Code::UNKNOWN;
-      Type type = Type::HTTP_1_1;
+      std::map<std::string, std::string> headers;  //响应头键值对（如 Content-Length, ETag 等）
+      Code code = Code::UNKNOWN;                      //HTTP 状态码
+      Type type = Type::HTTP_1_1;                     //HTTP 协议版本
       
+      //判断 HTTP 状态码是否为成功（2xx）
+      //HTTPMessage::execute() 用它决定进入 Finished 还是 Aborted
       static constexpr auto checkSuccess(const Code& code) {
         return (code == Code::OK_200 || code == Code::CREATED_201 || 
                 code == Code::NO_CONTENT_204 || code == Code::PARTIAL_CONTENT_206);
       }
+      //状态码 → 字符串（如 Code::OK_200 → "200 OK"）
       static constexpr std::string_view getResponseCode(const Code& code) noexcept {
         switch (code) {
             case Code::OK_200: return "200 OK";
@@ -62,6 +71,7 @@ namespace myblob::network {
             default: return "UNKNOWN";
         }
       }
+      //状态码 → 数字（如 Code::OK_200 → 200）
       static constexpr uint64_t getResponseCodeNumber(const Code& code) noexcept {
         switch (code) {
             case Code::OK_200: return 200;
@@ -82,9 +92,11 @@ namespace myblob::network {
             default: return 0;
         }
       }
+      //判断是否无响应体（204 No Content 没有 body）
       static constexpr auto withoutContent(const Code& code){
         return code ==Code::NO_CONTENT_204;
       }
+      //协议版本 → 字符串（如 Type::HTTP_1_1 → "HTTP/1.1"）
       static constexpr std::string_view getResponseType(const Type&type) noexcept{
         switch(type){
             case Type::HTTP_1_0:return "HTTP/1.0";
@@ -92,7 +104,8 @@ namespace myblob::network {
             default: return "UNKNOWN";
         }
       }
-      //把字符串解析成httpResponse对象
+      //把原始 HTTP 响应字符串解析成 HttpResponse 对象
+      //如 "HTTP/1.1 200 OK\r\nContent-Length: 1024\r\n\r\n" → {code=OK_200, headers={...}}
       static HttpResponse deserialize(std::string_view data);
 
   };

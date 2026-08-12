@@ -2,15 +2,14 @@
 #include "cloud/transaction.hpp"
 #include <iostream>
 #include <vector>
+#include <cstdlib>
 
 int main() {
     using namespace myblob;
-    
-    // 使用 HTTP Provider 测试批量请求功能
-    auto provider = cloud::Provider::makeProvider(
-        "http://httpbin.org",
-        false
-    );
+
+    const char* env = getenv("MYBLOB_ENDPOINT");
+    std::string endpoint = env ? env : "http://httpbin.org";
+    auto provider = cloud::Provider::makeProvider(endpoint, false);
     
     if (!provider) {
         std::cerr << "创建 Provider 失败" << std::endl;

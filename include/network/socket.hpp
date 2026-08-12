@@ -37,8 +37,8 @@ public:
     };
     
     virtual ~Socket() = default;
-    virtual bool send(const Request& req, int32_t msgFlags = 0) = 0;
-    virtual bool recv(Request& req, int32_t msgFlags = 0) = 0;
+    virtual bool send(const Request& req, int32_t msgFlags = 0) = 0;//提交发送请求
+    virtual bool recv(Request& req, int32_t msgFlags = 0) = 0;//提交结收请求
     virtual bool send_to(Request& req, std::chrono::milliseconds timeout, int32_t msgFlags = 0) = 0;
     virtual bool recv_to(Request& req, std::chrono::milliseconds timeout, int32_t msgFlags = 0) = 0;
     virtual Request* complete() = 0;

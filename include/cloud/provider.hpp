@@ -18,6 +18,10 @@ struct Config;
 
 namespace cloud {
 
+enum class CloudService : uint8_t;
+class AWS;
+class Transaction;
+
 class Provider {
 public:
     /// 远程协议前缀数量
@@ -38,7 +42,7 @@ public:
     using CloudService = myblob::cloud::CloudService;
 
     // 实例信息结构体
-    struct Instance {
+    struct Instance {//用于获取当前运行环境的云实例信息
         std::string region;
         std::string zone;
         std::string type;
@@ -48,12 +52,12 @@ public:
     };
 
     // 静态成员
-    static bool testEnviornment;
+    static bool testEnvironment;
 
     // 构造函数
     Provider(myblob::network::ConnectionManager& conn_mgr,
              myblob::network::HttpClient& http_client,
-             CloudService type);
+             CloudService type);//不需要立即指定服务器地址，地址在后续通过其他方式设置
     
     Provider(const std::string& addr, uint16_t port,
              myblob::network::ConnectionManager& conn_mgr,
@@ -63,6 +67,7 @@ public:
     virtual ~Provider() = default;
 
     // 纯虚函数
+    //每个云服务商的 HTTP 请求长得完全不一样，基类没法给出有意义的默认实现。
     virtual std::unique_ptr<utils::DataVector<uint8_t>> getRequest(
         const std::string& filePath,
         const std::pair<uint64_t, uint64_t>& range = {0, 0}
@@ -102,12 +107,13 @@ public:
         uint64_t bodyLength = 0
     ) const = 0;
     
-    virtual uint64_t multipartUploadSize() const = 0;
+    virtual uint64_t multipartUploadSize() const = 0;//不同 Provider 对分片的支持不同
     
-    virtual Instance getInstanceDetails(myblob::network::TaskedSendReceiverHandle& sendReceiver) = 0;
+    virtual Instance getInstanceDetails(myblob::network::TaskedSendReceiverHandle& sendReceiver) = 0;//每家云的实例元数据路径不同
     
-    virtual void initCache(myblob::network::TaskedSendReceiverHandle& sendReceiverHandle) = 0;
-    
+    virtual void initCache(myblob::network::TaskedSendReceiverHandle& sendReceiverHandle) = 0;//缓存策略因云而异
+    //address_ 和 port_ 只是给 HTTPProvider 这种"地址明确写在 URL 里"的简单场景用的。
+    //对 AWS/Azure/GCP 来说，地址是根据 bucket、region、账户名等拼出来的，跟基类存储的 address_ 毫无关系。 
     virtual std::string getAddress() const = 0;
     
     virtual uint16_t getPort() const = 0;
@@ -157,11 +163,11 @@ public:
     static std::string getCloudServiceName(CloudService service);
     static std::string getCloudServiceName(const std::string& url);
     
-    bool isHTTPS() const {
+    virtual bool isHTTPS() const {
+        // MinIO 不在此列：由 AWS::isHTTPS() override 按端口动态判断 (443→HTTPS, 其他→HTTP)
         return type_ == CloudService::HTTPS || type_ == CloudService::AWS ||
                type_ == CloudService::Azure || type_ == CloudService::GCP ||
-               type_ == CloudService::Oracle || type_ == CloudService::IBM ||
-               type_ == CloudService::MinIO;
+               type_ == CloudService::Oracle || type_ == CloudService::IBM;
     }
 
 protected:
@@ -170,10 +176,11 @@ protected:
     std::string address_;
     uint16_t port_ = 0;
     CloudService type_;
-    CloudService _type;
 
     virtual void initSecret(myblob::network::TaskedSendReceiverHandle& sendReceiverHandle) = 0;
     virtual void getSecret() = 0;
+
+    friend class Transaction;
 };
 
 } // namespace cloud

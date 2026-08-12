@@ -2,7 +2,10 @@
 #include "network/https_message.hpp"
 #include "network/tls_context.hpp"
 #include "network/connection_manager.hpp"
+#include "network/message_failure_code.hpp"
+#include <cerrno>
 #include <cassert>
+#include <iostream>
 #include <memory>
 #include <utility>
 #include <openssl/bio.h>
@@ -12,11 +15,14 @@
 
 namespace myblob::network {
 
-TLSConnection::TLSConnection(TLSContext& context) 
-    : _message(nullptr), 
-      _context(context), 
-      _ssl(nullptr), 
-      _state(), 
+TLSConnection::TLSConnection(TLSContext& context)
+    : _message(nullptr),
+      _context(context),
+      _ssl(nullptr),
+      _internalBio(nullptr),
+      _networkBio(nullptr),
+      _buffer(nullptr),
+      _state(),
       _connected(false) {
 }
 
@@ -35,27 +41,65 @@ bool TLSConnection::init(HTTPSMessage* message) {
             return false;
         }
         SSL_set_connect_state(_ssl);
-        BIO_new_bio_pair(&_internalBio, _message->chunkSize, &_networkBio, _message->chunkSize);
+        if (!BIO_new_bio_pair(&_internalBio, static_cast<int>(_message->chunkSize),
+                               &_networkBio, static_cast<int>(_message->chunkSize))) {
+            SSL_free(_ssl);
+            _ssl = nullptr;
+            return false;
+        }
         SSL_set_bio(_ssl, _internalBio, _internalBio);
         _context.reuseSession(_message->fd, _ssl);
     } else {
         _message = message;
-        BIO_free(_networkBio);
-        BIO_new_bio_pair(&_internalBio, _message->chunkSize, &_networkBio, _message->chunkSize);
+        // SSL_free handles BIO cleanup, so just free old SSL and create new
+        if (_ssl) {
+            SSL_free(_ssl);   // also frees attached BIOs
+            _ssl = nullptr;
+        }
+        _internalBio = nullptr;  // already freed by SSL_free above
+        if (_networkBio) {
+            BIO_free(_networkBio);   // peer BIO NOT freed by SSL_free in OpenSSL 3.x
+            _networkBio = nullptr;
+        }
+        if (!BIO_new_bio_pair(&_internalBio, static_cast<int>(_message->chunkSize),
+                               &_networkBio, static_cast<int>(_message->chunkSize))) {
+            return false;
+        }
+        _ssl = SSL_new(_context._ctx);
+        if (!_ssl) return false;
+        SSL_set_connect_state(_ssl);
         SSL_set_bio(_ssl, _internalBio, _internalBio);
-        _connected = true;
     }
     _message = message;
     _buffer = std::make_unique<char[]>(_message->chunkSize);
+    _state.progress = Progress::Init;
+    _state.reset();
+    _connected = false;
     return true;
 }
 
 void TLSConnection::destroy() {
+    _message = nullptr;
     _state.reset();
+    _state.progress = Progress::Init;
+    _connected = false;
+    // OpenSSL 3.x: SSL_free 内部会调用 BIO_free_all 释放 rbio/wbio。
+    // BIO pair 之间共享引用计数，所以让 SSL_free 处理 rbio/wbio，
+    // 之后只需要手动释放未被 SSL 持有的 network BIO。
     if (_ssl) {
+        BIO* rbio = SSL_get_rbio(_ssl);
         SSL_free(_ssl);
-        BIO_free(_networkBio);
         _ssl = nullptr;
+        // rbio 已被 SSL_free 释放，标记为 null 避免 double-free
+        if (_internalBio == rbio) _internalBio = nullptr;
+    }
+    if (_networkBio) {
+        BIO_free(_networkBio);
+        _networkBio = nullptr;
+    }
+    if (_internalBio) {
+        BIO_free(_internalBio);
+        _internalBio = nullptr;
     }
 }
 
@@ -133,9 +177,34 @@ TLSConnection::Progress TLSConnection::connect(
         auto sslConnect = [ssl]() {
             return SSL_connect(ssl);
         };
-        return operationHelper(connectionManager, sslConnect, unused);
+        auto status = operationHelper(connectionManager, sslConnect, unused);
+        if (status == Progress::Finished) {
+            _connected = true;
+        }
+        return status;
     }
-    return _state.progress;
+    return Progress::Finished;
+}
+
+TLSConnection::Progress TLSConnection::shutdown(
+    ConnectionManager& connectionManager,
+    bool failedOnce
+) {
+    int64_t unused = 0;
+    auto ssl = this->_ssl;
+    auto sslShutdown = [ssl]() {
+        return SSL_shutdown(ssl);
+    };
+    auto status = operationHelper(connectionManager, sslShutdown, unused);
+    if (status == Progress::Finished) {
+        _context.cacheSession(_message->fd, ssl);
+    } else if (status == Progress::Aborted) {
+        if (!failedOnce) {
+            return shutdown(connectionManager, true);
+        }
+        _context.dropSession(_message->fd);
+    }
+    return status;
 }
 
 TLSConnection::Progress TLSConnection::process(
@@ -180,22 +249,20 @@ TLSConnection::Progress TLSConnection::process(
                     _state.progress = Progress::Sending;
                     auto writeSize = static_cast<size_t>(_state.networkBioRead) - _state.socketWrite;
                     const uint8_t* ptr = reinterpret_cast<uint8_t*>(_buffer.get()) + _state.socketWrite;
-                    if (_message->request) {
-                        *_message->request = Socket::Request{
-                            .data = {.sendData = ptr}, 
-                            .length = static_cast<int64_t>(writeSize), 
-                            .fd = _message->fd, 
-                            .event = Socket::EventType::write, 
-                            .userData = _message
-                        };
-                        if (writeSize <= _message->chunkSize) {
-                            connectionManager.getPollSocket().send_to(
-                                *_message->request, 
-                                _message->tcpSettings.timeout
-                            );
-                        } else {
-                            connectionManager.getPollSocket().send(*_message->request);
-                        }
+                    _message->request = std::make_unique<Socket::Request>(Socket::Request{
+                        .data = {.sendData = ptr}, 
+                        .length = static_cast<int64_t>(writeSize), 
+                        .fd = _message->fd, 
+                        .event = Socket::EventType::write, 
+                        .userData = _message
+                    });
+                    if (writeSize <= _message->chunkSize) {
+                        connectionManager.getSocket().send_to(
+                            *_message->request, 
+                            _message->tcpSettings.timeout
+                        );
+                    } else {
+                        connectionManager.getSocket().send(*_message->request);
                     }
                     return _state.progress;
                 } else {
@@ -214,6 +281,8 @@ TLSConnection::Progress TLSConnection::process(
             if (_state.internalBioRead) {
                 if (_state.progress == Progress::Receiving) {
                     if (_message->request && _message->request->length == 0) {
+                        auto code = _message->originalMessage->result.getFailureCode();
+                        _message->originalMessage->result.setFailureCode(code | static_cast<uint16_t>(MessageFailureCode::Empty));
                         _state.progress = Progress::Aborted;
                         return _state.progress;
                     } else if (_message->request && _message->request->length > 0) {
@@ -227,6 +296,14 @@ TLSConnection::Progress TLSConnection::process(
                     } else if (_message->request && 
                               _message->request->length != -EINPROGRESS && 
                               _message->request->length != -EAGAIN) {
+                        if (_message->request->length == -ECANCELED || 
+                            _message->request->length == -EINTR) {
+                            auto code = _message->originalMessage->result.getFailureCode();
+                            _message->originalMessage->result.setFailureCode(code | static_cast<uint16_t>(MessageFailureCode::Timeout));
+                        } else {
+                            auto code = _message->originalMessage->result.getFailureCode();
+                            _message->originalMessage->result.setFailureCode(code | static_cast<uint16_t>(MessageFailureCode::Recv));
+                        }
                         _state.progress = Progress::Aborted;
                         return _state.progress;
                     }
@@ -240,20 +317,18 @@ TLSConnection::Progress TLSConnection::process(
                         : _message->chunkSize;
                     uint8_t* ptr = reinterpret_cast<uint8_t*>(_buffer.get()) + _state.socketRead;
                     assert(readSize <= INT64_MAX);
-                    if (_message->request) {
-                        *_message->request = Socket::Request{
-                            .data = {.data = ptr}, 
-                            .length = static_cast<int64_t>(readSize), 
-                            .fd = _message->fd, 
-                            .event = Socket::EventType::read, 
-                            .userData = _message
-                        };
-                        connectionManager.getPollSocket().recv_to(
-                            *_message->request,
-                            _message->tcpSettings.timeout,
-                            _message->tcpSettings.recvNoWait ? MSG_DONTWAIT : 0
-                        );
-                    }
+                    _message->request = std::make_unique<Socket::Request>(Socket::Request{
+                        .data = {.recvData = ptr}, 
+                        .length = static_cast<int64_t>(readSize), 
+                        .fd = _message->fd, 
+                        .event = Socket::EventType::read, 
+                        .userData = _message
+                    });
+                    connectionManager.getSocket().recv_to(
+                        *_message->request,
+                        _message->tcpSettings.timeout,
+                        0
+                    );
                     return _state.progress;
                 } else {
                     _state.progress = Progress::Finished;

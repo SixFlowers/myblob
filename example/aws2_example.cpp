@@ -1,15 +1,14 @@
 #include "cloud/provider.hpp"
 #include "cloud/transaction.hpp"
 #include <iostream>
+#include <cstdlib>
 
 int main() {
     using namespace myblob;
-    
-    // 使用 HTTPS Provider 测试基本功能
-    auto provider = cloud::Provider::makeProvider(
-        "https://httpbin.org",
-        true  // HTTPS
-    );
+
+    const char* env = getenv("MYBLOB_ENDPOINT");
+    std::string endpoint = env ? env : "https://httpbin.org";
+    auto provider = cloud::Provider::makeProvider(endpoint, true);
     
     if (!provider) {
         std::cerr << "创建 Provider 失败" << std::endl;

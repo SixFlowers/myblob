@@ -2,6 +2,7 @@
 #include "cloud/transaction.hpp"
 #include "network/message_result.hpp"
 #include <iostream>
+#include <cstdlib>
 
 // ================================================================
 // 打印结果的回调函数
@@ -28,7 +29,9 @@ int main() {
     // ================================================================
     // 1. 创建 Provider
     // ================================================================
-    auto provider = myblob::cloud::Provider::makeProvider("http://httpbin.org");
+    const char* env = getenv("MYBLOB_ENDPOINT");
+    std::string endpoint = env ? env : "http://httpbin.org";
+    auto provider = myblob::cloud::Provider::makeProvider(endpoint);
     if (!provider) {
         std::cerr << "创建 Provider 失败" << std::endl;
         return 1;

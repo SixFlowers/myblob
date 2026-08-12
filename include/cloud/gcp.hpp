@@ -44,7 +44,7 @@ public:
         : Provider(info.endpoint, info.port, conn_mgr, http_client, info.provider)
         , _settings({info.bucket, info.region, info.port}) {
         assert(info.provider == CloudService::GCP);
-        _type = info.provider;
+        type_ = info.provider;
     }
 
     /// 构造函数（显式密钥）

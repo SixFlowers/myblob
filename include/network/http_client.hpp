@@ -30,7 +30,7 @@ public:
                                    uint64_t length = 0, int maxRetries = 3,
                                    int timeoutSeconds = 5);
     
-    HttpResponse sendRequest(std::shared_ptr<Connection> conn,
+    HttpResponse sendRequest(std::unique_ptr<Connection>& conn,
                              const std::string& method,
                              const std::string& path,
                              uint64_t offset = 0,

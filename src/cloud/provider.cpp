@@ -13,20 +13,7 @@
 namespace myblob::cloud {
 using namespace std;
 // 定义静态成员
-bool Provider::testEnviornment = false;
-
-// 远程文件协议前缀
-static const char* remoteFile[] = {
-    "https://",
-    "http://",
-    "s3://",
-    "azure://",
-    "gs://",
-    "oci://",
-    "ibm://",
-    "minio://"
-};
-static const size_t remoteFileCount = sizeof(remoteFile) / sizeof(remoteFile[0]);
+bool Provider::testEnvironment = false;
 
 Provider::Provider(myblob::network::ConnectionManager& conn_mgr,
                    myblob::network::HttpClient& http_client,
@@ -34,8 +21,7 @@ Provider::Provider(myblob::network::ConnectionManager& conn_mgr,
     : conn_mgr_(&conn_mgr)
     , http_client_(&http_client)
     , type_(type) {
-    std::cerr << "[DEBUG] Provider: Created with ConnectionManager, type=" 
-              << static_cast<int>(type_) << std::endl;
+    // Provider created
 }
 
 Provider::Provider(const std::string& addr, uint16_t port,
@@ -47,13 +33,12 @@ Provider::Provider(const std::string& addr, uint16_t port,
     , address_(addr)
     , port_(port)
     , type_(type) {
-    std::cerr << "[DEBUG] Provider: Created with addr/port, type=" 
-              << static_cast<int>(type_) << std::endl;
+    // [DEBUG] Provider created with addr/port, type=... (silenced for production)
 }
-
+//判断一个 URL 字符串是"远程云存储地址"还是"本地文件路径"
 bool Provider::isRemoteFile(const std::string& url) {
-    for (size_t i = 0; i < remoteFileCount; i++) {
-        if (url.find(remoteFile[i]) == 0) {
+    for (size_t i = 0; i < Provider::remoteFileCount; i++) {
+        if (url.find(Provider::remoteFile[i]) == 0) {
             return true;
         }
     }
@@ -104,10 +89,14 @@ std::unique_ptr<Provider> Provider::createProvider(
         case CloudService::AWS:{
             return std::make_unique<AWS>(info,conn_mgr,http_client);
         }
-        case CloudService::MinIO:
+        case CloudService::MinIO: {
+            return std::make_unique<MinIO>(info, conn_mgr, http_client);
+        }
         case CloudService::Oracle:
         case CloudService::IBM: {
-            return std::make_unique<AWS>(info, conn_mgr, http_client);
+            // TODO: 实现 OracleProvider 和 IBMProvider
+            std::cerr << "[ERROR] Oracle and IBM providers not implemented yet" << std::endl;
+            return nullptr;
         }
         case CloudService::Azure:{
             return std::make_unique<Azure>(info, conn_mgr, http_client);
@@ -128,11 +117,14 @@ std::unique_ptr<Provider> Provider::createProvider(
 // 旧的makeProvider函数，为了向后兼容
 std::unique_ptr<Provider> Provider::makeProvider(
     const std::string& url,
-    bool https,
+    bool https,//调用者强制设置https覆盖
     const std::string& access_key,
     const std::string& secret_key,
-    void* send_receiver_handle
+    void* /*send_receiver_handle*/
 ) {
+    // NOTE: function-static — all Providers created via makeProvider share
+    // the same connection pool & HTTP client. This is fine for simple usage
+    // but for production: use createProvider() with explicit lifetime control.
     static myblob::network::ConnectionManager conn_mgr;
     static myblob::network::HttpClient http_client;
     
@@ -144,23 +136,47 @@ std::unique_ptr<Provider> Provider::makeProvider(
             info.provider = CloudService::HTTPS;
         }
     }
-    
+
+    if (!access_key.empty() || !secret_key.empty()) {
+        switch (info.provider) {
+            case CloudService::AWS:
+                return std::make_unique<AWS>(info, access_key, secret_key, conn_mgr, http_client);
+            case CloudService::MinIO:
+                return std::make_unique<MinIO>(info, access_key, secret_key, conn_mgr, http_client);
+            case CloudService::Azure:
+                return std::make_unique<Azure>(info, access_key, secret_key, conn_mgr, http_client);
+            case CloudService::GCP:
+                return std::make_unique<GCP>(info, access_key, secret_key, conn_mgr, http_client);
+            default:
+                break;
+        }
+    }
+
     return createProvider(info, conn_mgr, http_client);
 }
 
 myblob::network::HttpResponse Provider::download(const std::string& file_path,
                                         uint64_t offset,
                                         uint64_t length) {
-    std::cerr << "[DEBUG] Provider::download: file_path=" << file_path << std::endl;
+    // Provider::download called
 
-    if (!conn_mgr_ || !http_client_) {
+    if (!conn_mgr_ || !http_client_) {//构造函数中设置
         std::cerr << "[ERROR] ConnectionManager or HttpClient not initialized" << std::endl;
         return myblob::network::HttpResponse{};
     }
 
     bool use_tls = isHTTPS();
 
-    auto connection = conn_mgr_->getConnection(address_, port_, use_tls);
+    // 使用虚函数获取地址和端口，允许子类动态生成（如AWS的S3地址）
+    std::string addr = getAddress();
+    uint16_t port = getPort();
+    
+    if (addr.empty()) {
+        std::cerr << "[ERROR] Provider address is empty" << std::endl;
+        return myblob::network::HttpResponse{};
+    }
+
+    auto connection = conn_mgr_->getConnection(addr, port, use_tls);
 
     if (!connection) {
         std::cerr << "[ERROR] Failed to get connection from pool" << std::endl;
@@ -175,7 +191,7 @@ myblob::network::HttpResponse Provider::download(const std::string& file_path,
         length
     );
 
-    conn_mgr_->returnConnection(connection);
+    conn_mgr_->returnConnection(std::move(connection));
 
     if (!myblob::network::HttpResponse::checkSuccess(response.code)) {
         std::cerr << "[ERROR] Download failed: status="
@@ -192,14 +208,44 @@ myblob::network::Config Provider::getConfig(myblob::network::TaskedSendReceiverH
 }
 
 // 静态辅助方法
+// 从HTTP响应头中提取ETag
+// ETag格式: ETag: "abc123" 或 ETag: abc123  ETag内容校验码
+//每个分片各自独立请求、各自独立返回一个 ETag。不是一次性返回全部。
 std::string Provider::getETag(std::string_view header) {
-    // 默认实现返回空字符串
-    return "";
+    std::string_view needle = "ETag: \"";
+    auto pos = header.find(needle);
+    if (pos == std::string_view::npos) {
+        needle = "etag: \"";
+        pos = header.find(needle);
+    }
+    if (pos == std::string_view::npos) {
+        return "";
+    }
+
+    pos += needle.size();
+    auto end = header.find('"', pos);
+    if (end == std::string_view::npos) {
+        return "";
+    }
+
+    return std::string(header.substr(pos, end - pos));
 }
 
+// 从XML响应体中提取UploadId
+// 格式: <UploadId>abc123</UploadId>
 std::string Provider::getUploadId(std::string_view body) {
-    // 默认实现返回空字符串
-    return "";
+    size_t start = body.find("<UploadId>");
+    if (start == std::string_view::npos) {
+        return "";
+    }
+    start += 10; // 跳过 "<UploadId>"
+    
+    size_t end = body.find("</UploadId>", start);
+    if (end == std::string_view::npos) {
+        return "";
+    }
+    
+    return std::string(body.substr(start, end - start));
 }
 
 }  // namespace myblob::cloud

@@ -55,7 +55,7 @@ public:
   }
   
   template <bool wait = false>
-  [[nodiscard]] uint64_t insert(T tuple){
+  [[nodiscard]] uint64_t insert(const T& tuple){
     while(true){
       std::unique_lock<SpinMutex> lock(_insert.mutex);
       //获取已消费位置
@@ -82,10 +82,11 @@ public:
       auto curInsert = _insert.pending.load();
       if(_size >= tuples.size() && curInsert - seenHead < _size + 1 - tuples.size()){
         _insert.pending.fetch_add(tuples.size(),std::memory_order_release);
-        auto off = 0u;
+        // Write with wrap-aware loop (avoid % in hot path)
+        size_t pos = curInsert % _size;
         for(const auto& tuple : tuples){
-          _buffer[(curInsert + off) % _size] = tuple;
-          off++;
+          _buffer[pos] = tuple;
+          if (++pos >= _size) pos = 0;  // manual wrap, cheaper than %
         }
         _insert.commited.fetch_add(tuples.size(),std::memory_order_release);
         return curInsert;
